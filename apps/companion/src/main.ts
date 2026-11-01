@@ -50,15 +50,21 @@ const host = Command.make('host', {}, () =>
 
 const installCommand = Command.make(
   'install',
-  { extensionId: Flag.String('extension-id').pipe(Flag.withDefault(defaultExtensionId), Flag.withDescription('Extension id allowed to connect')) },
-  ({ extensionId }) =>
+  {
+    extensionIds: Flag.String('extension-id').pipe(
+      Flag.withDefault(''),
+      Flag.withDescription('Comma-separated Chrome Web Store or Edge Add-ons ids allowed to connect, besides the unpacked build'),
+    ),
+  },
+  ({ extensionIds }) =>
     Effect.gen(function* () {
-      const plan = yield* install(extensionId)
+      const ids = [defaultExtensionId, ...extensionIds.split(',').map((id) => id.trim()).filter(Boolean)]
+      const plan = yield* install(ids)
       for (const f of plan.files) yield* Console.log(`Wrote ${f.path}`)
       for (const r of plan.registry) yield* Console.log(`Registered ${r.key}`)
-      yield* Console.log(`Chrome extension ${extensionId} and Firefox extension ${GECKO_ID} can now start the companion.`)
+      yield* Console.log(`Chromium extensions ${ids.join(', ')} and Firefox extension ${GECKO_ID} can now start the companion.`)
     }),
-).pipe(Command.withDescription('Register the native messaging host with Chrome and Firefox'))
+).pipe(Command.withDescription('Register the native messaging host with Chrome, Chromium, Edge and Firefox'))
 
 Command.make('pr-review').pipe(
   Command.withSubcommands([installCommand, host]),

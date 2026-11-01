@@ -27,6 +27,8 @@ Chrome: open `chrome://extensions`, turn on developer mode, and load `apps/exten
 
 Both extension ids are pinned (`pr-review@jorrinkievit` in Firefox, a fixed key in Chrome), so `install` and the extension always agree.
 
+Store builds (see Release) get their ids from the Chrome Web Store and Edge Add-ons. Allow them with `pr-review install --extension-id <chrome-id>,<edge-id>`; the unpacked build stays allowed.
+
 ## Settings
 
 Open the add-on's preferences. The extension keeps the settings in its own storage and hands them to the companion, which keeps a copy in `~/.config/pr-review/settings.json` so a reinstalled add-on gets them back.
@@ -74,3 +76,15 @@ Load `<WXT_OUT_DIR>/firefox-mv2-dev/manifest.json` from `about:debugging`. Compa
 pnpm test
 pnpm typecheck
 ```
+
+## Release
+
+Push a `v*` tag (`git tag v0.2.0 && git push origin v0.2.0`). The Extension workflow tests, zips Chrome, Firefox (plus a sources zip for AMO) and Edge, attaches them to a GitHub release, and submits each to its store when that store's secrets are set:
+
+| Store | Secrets |
+| --- | --- |
+| Chrome Web Store | `CHROME_EXTENSION_ID`, `CHROME_PUBLISHER_ID`, `CHROME_SERVICE_ACCOUNT_CLIENT_EMAIL`, `CHROME_SERVICE_ACCOUNT_PRIVATE_KEY` |
+| Firefox Add-ons | `FIREFOX_JWT_ISSUER`, `FIREFOX_JWT_SECRET` (repo variable `FIREFOX_CHANNEL=unlisted` to self-distribute instead of listing) |
+| Edge Add-ons | `EDGE_PRODUCT_ID`, `EDGE_CLIENT_ID`, `EDGE_API_KEY` |
+
+The first upload to each store is manual; the workflow handles updates. Running the workflow by hand builds a given version and submits only when asked.

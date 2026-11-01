@@ -1,0 +1,81 @@
+name: Extension
+
+# A v* tag builds every browser, attaches the zips to a GitHub release and submits them to each store
+# whose secrets are set. Running it by hand does the same without the release.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Extension version, such as 0.2.0
+        required: true
+      publish:
+        description: Submit to the stores
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      EXTENSION_VERSION: ${{ inputs.version || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck && pnpm test
+
+      - name: Zip Chrome, Firefox and Edge
+        working-directory: apps/extension
+        env:
+          STORE_BUILD: '1'
+        run: |
+          export EXTENSION_VERSION="${EXTENSION_VERSION#v}"
+          pnpm zip
+          echo "ZIPS=$PWD/.output/pr-review-$EXTENSION_VERSION" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: extension
+          path: apps/extension/.output/*.zip
+
+      - name: GitHub release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" apps/extension/.output/*.zip --generate-notes
+
+      - name: Submit to the stores
+        if: github.ref_type == 'tag' || inputs.publish
+        working-directory: apps/extension
+        env:
+          CHROME_API_VERSION: v2
+          CHROME_EXTENSION_ID: ${{ secrets.CHROME_EXTENSION_ID }}
+          CHROME_PUBLISHER_ID: ${{ secrets.CHROME_PUBLISHER_ID }}
+          CHROME_SERVICE_ACCOUNT_CLIENT_EMAIL: ${{ secrets.CHROME_SERVICE_ACCOUNT_CLIENT_EMAIL }}
+          CHROME_SERVICE_ACCOUNT_PRIVATE_KEY: ${{ secrets.CHROME_SERVICE_ACCOUNT_PRIVATE_KEY }}
+          FIREFOX_EXTENSION_ID: pr-review@jorrinkievit
+          FIREFOX_CHANNEL: ${{ vars.FIREFOX_CHANNEL || 'listed' }}
+          FIREFOX_JWT_ISSUER: ${{ secrets.FIREFOX_JWT_ISSUER }}
+          FIREFOX_JWT_SECRET: ${{ secrets.FIREFOX_JWT_SECRET }}
+          EDGE_PRODUCT_ID: ${{ secrets.EDGE_PRODUCT_ID }}
+          EDGE_CLIENT_ID: ${{ secrets.EDGE_CLIENT_ID }}
+          EDGE_API_KEY: ${{ secrets.EDGE_API_KEY }}
+        run: |
+          args=()
+          [ -n "$CHROME_EXTENSION_ID" ] && args+=(--chrome-zip "$ZIPS-chrome.zip")
+          [ -n "$FIREFOX_JWT_ISSUER" ] && args+=(--firefox-zip "$ZIPS-firefox.zip" --firefox-sources-zip "$ZIPS-sources.zip")
+          [ -n "$EDGE_PRODUCT_ID" ] && args+=(--edge-zip "$ZIPS-edge.zip")
+          if [ ${#args[@]} -eq 0 ]; then
+            echo "::notice::No store secrets set, nothing submitted"
+            exit 0
+          fi
+          pnpm exec wxt submit "${args[@]}"

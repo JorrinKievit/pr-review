@@ -13,14 +13,14 @@ const launch = { node: '/usr/bin/node', main: '/repo/apps/companion/src/main.ts'
 const launcher = '/home/u/.local/share/pr-review/pr-review-host'
 
 describe('install', () => {
-  it('manifest allows only the pinned extension', () => {
+  it('manifest allows only the given extensions: the pinned one, and store ids', () => {
     assert.strictEqual(extensionIdFromKey(EXTENSION_KEY), 'nnejfifahepalipdkodocgfjbgicngol')
-    assert.deepStrictEqual(hostManifest({ path: launcher, extensionId: 'abc' }), {
+    assert.deepStrictEqual(hostManifest({ path: launcher, extensionIds: ['abc', 'def'] }), {
       name: 'pr_review',
       description: 'PR Review companion',
       path: launcher,
       type: 'stdio',
-      allowed_origins: ['chrome-extension://abc/'],
+      allowed_origins: ['chrome-extension://abc/', 'chrome-extension://def/'],
     })
   })
 
@@ -35,37 +35,39 @@ describe('install', () => {
   })
 
   it('the launcher runs main.ts host with an absolute node', () => {
-    const [script] = installTargets({ platform: 'linux', home: '/home/u', ...launch, extensionId: 'abc' }).files
+    const [script] = installTargets({ platform: 'linux', home: '/home/u', ...launch, extensionIds: ['abc'] }).files
     assert.deepStrictEqual(script, { path: launcher, content: `#!/bin/sh\nexec '/usr/bin/node' '/repo/apps/companion/src/main.ts' host\n`, executable: true })
   })
 
-  it('linux targets chrome, chromium and firefox', () => {
-    const t = installTargets({ platform: 'linux', home: '/home/u', ...launch, extensionId: 'abc' })
+  it('linux targets chrome, chromium, edge and firefox', () => {
+    const t = installTargets({ platform: 'linux', home: '/home/u', ...launch, extensionIds: ['abc'] })
     assert.deepStrictEqual(t.files.map((f) => f.path), [
       launcher,
       '/home/u/.config/google-chrome/NativeMessagingHosts/pr_review.json',
       '/home/u/.config/chromium/NativeMessagingHosts/pr_review.json',
+      '/home/u/.config/microsoft-edge/NativeMessagingHosts/pr_review.json',
       '/home/u/.mozilla/native-messaging-hosts/pr_review.json',
     ])
     assert.strictEqual(JSON.parse(t.files[1]!.content).path, launcher)
-    assert.deepStrictEqual(JSON.parse(t.files[3]!.content).allowed_extensions, ['pr-review@jorrinkievit'])
+    assert.deepStrictEqual(JSON.parse(t.files[4]!.content).allowed_extensions, ['pr-review@jorrinkievit'])
     assert.deepStrictEqual(t.registry, [])
   })
 
-  it('macOS targets Chrome and Firefox in Application Support', () => {
-    const t = installTargets({ platform: 'darwin', home: '/Users/u', ...launch, extensionId: 'abc' })
+  it('macOS targets Chrome, Edge and Firefox in Application Support', () => {
+    const t = installTargets({ platform: 'darwin', home: '/Users/u', ...launch, extensionIds: ['abc'] })
     assert.deepStrictEqual(t.files.map((f) => f.path).slice(1), [
       '/Users/u/Library/Application Support/Google/Chrome/NativeMessagingHosts/pr_review.json',
+      '/Users/u/Library/Application Support/Microsoft Edge/NativeMessagingHosts/pr_review.json',
       '/Users/u/Library/Application Support/Mozilla/NativeMessagingHosts/pr_review.json',
     ])
   })
 
-  it('WSL writes a bat that runs host through wsl.exe and registry entries for Chrome and Firefox', () => {
+  it('WSL writes a bat that runs host through wsl.exe and registry entries for Chrome, Edge and Firefox', () => {
     const t = installTargets({
       platform: 'linux',
       home: '/home/u',
       ...launch,
-      extensionId: 'abc',
+      extensionIds: ['abc'],
       wsl: { distro: 'Ubuntu', localAppData: { linux: '/mnt/c/Users/u/AppData/Local', windows: 'C:\\Users\\u\\AppData\\Local' } },
     })
     const [script, bat, manifest, firefox] = t.files
@@ -79,6 +81,7 @@ describe('install', () => {
     assert.strictEqual(JSON.parse(firefox!.content).path, 'C:\\Users\\u\\AppData\\Local\\pr-review\\pr-review-host.bat')
     assert.deepStrictEqual(t.registry, [
       { key: 'HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\pr_review', value: 'C:\\Users\\u\\AppData\\Local\\pr-review\\pr_review.json' },
+      { key: 'HKCU\\Software\\Microsoft\\Edge\\NativeMessagingHosts\\pr_review', value: 'C:\\Users\\u\\AppData\\Local\\pr-review\\pr_review.json' },
       { key: 'HKCU\\Software\\Mozilla\\NativeMessagingHosts\\pr_review', value: 'C:\\Users\\u\\AppData\\Local\\pr-review\\pr_review.firefox.json' },
     ])
   })

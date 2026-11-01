@@ -11,7 +11,7 @@ export const extensionIdFromKey = (key: string) =>
   [...createHash('sha256').update(Buffer.from(key, 'base64')).digest('hex').slice(0, 32)].map((c) => String.fromCharCode(97 + parseInt(c, 16))).join('')
 
 const baseManifest = (path: string) => ({ name: HOST_NAME, description: 'PR Review companion', path, type: 'stdio' })
-export const hostManifest = (o: { path: string; extensionId: string }) => ({ ...baseManifest(o.path), allowed_origins: [`chrome-extension://${o.extensionId}/`] })
+export const hostManifest = (o: { path: string; extensionIds: ReadonlyArray<string> }) => ({ ...baseManifest(o.path), allowed_origins: o.extensionIds.map((id) => `chrome-extension://${id}/`) })
 export const firefoxHostManifest = (path: string) => ({ ...baseManifest(path), allowed_extensions: [GECKO_ID] })
 
 export type Wsl = { distro: string; localAppData: { linux: string; windows: string } }
@@ -25,13 +25,13 @@ const firefoxManifestFile = `${HOST_NAME}.firefox.json`
 
 /**
  * Browsers start the host with a bare PATH, so the launcher names node by absolute path.
- * Chrome and Firefox get one manifest each. Under WSL the browser runs on Windows: both point at a .bat
+ * Chromium browsers share one manifest, Firefox gets its own. Under WSL the browser runs on Windows: both point at a .bat
  * that enters the distro, registered in HKCU.
  */
-export function installTargets(o: { platform: NodeJS.Platform; home: string; node: string; main: string; extensionId: string; wsl?: Wsl }): InstallPlan {
+export function installTargets(o: { platform: NodeJS.Platform; home: string; node: string; main: string; extensionIds: ReadonlyArray<string>; wsl?: Wsl }): InstallPlan {
   const launcher = join(o.home, '.local', 'share', 'pr-review', 'pr-review-host')
   const script = { path: launcher, content: `#!/bin/sh\nexec '${o.node}' '${o.main}' host\n`, executable: true }
-  const manifest = (path: string) => JSON.stringify(hostManifest({ path, extensionId: o.extensionId }), null, 2)
+  const manifest = (path: string) => JSON.stringify(hostManifest({ path, extensionIds: o.extensionIds }), null, 2)
   const firefox = (path: string) => JSON.stringify(firefoxHostManifest(path), null, 2)
 
   if (o.wsl) {
@@ -45,14 +45,19 @@ export function installTargets(o: { platform: NodeJS.Platform; home: string; nod
       ],
       registry: [
         { key: `HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\${HOST_NAME}`, value: `${dir.windows}\\${manifestFile}` },
+        { key: `HKCU\\Software\\Microsoft\\Edge\\NativeMessagingHosts\\${HOST_NAME}`, value: `${dir.windows}\\${manifestFile}` },
         { key: `HKCU\\Software\\Mozilla\\NativeMessagingHosts\\${HOST_NAME}`, value: `${dir.windows}\\${firefoxManifestFile}` },
       ],
     }
   }
   const mac = o.platform === 'darwin'
   const chromeDirs = mac
-    ? [join(o.home, 'Library', 'Application Support', 'Google', 'Chrome', 'NativeMessagingHosts')]
-    : [join(o.home, '.config', 'google-chrome', 'NativeMessagingHosts'), join(o.home, '.config', 'chromium', 'NativeMessagingHosts')]
+    ? [join(o.home, 'Library', 'Application Support', 'Google', 'Chrome', 'NativeMessagingHosts'), join(o.home, 'Library', 'Application Support', 'Microsoft Edge', 'NativeMessagingHosts')]
+    : [
+        join(o.home, '.config', 'google-chrome', 'NativeMessagingHosts'),
+        join(o.home, '.config', 'chromium', 'NativeMessagingHosts'),
+        join(o.home, '.config', 'microsoft-edge', 'NativeMessagingHosts'),
+      ]
   const firefoxDir = mac ? join(o.home, 'Library', 'Application Support', 'Mozilla', 'NativeMessagingHosts') : join(o.home, '.mozilla', 'native-messaging-hosts')
   return {
     files: [
@@ -77,7 +82,7 @@ const detectWsl = Effect.gen(function* () {
   return { distro, localAppData: { windows, linux: yield* output('wslpath', ['-u', windows]) } } satisfies Wsl
 })
 
-export const install = Effect.fn('install')(function* (extensionId: string) {
+export const install = Effect.fn('install')(function* (extensionIds: ReadonlyArray<string>) {
   const fs = yield* FileSystem.FileSystem
   const wsl = yield* detectWsl
   const plan = installTargets({
@@ -85,7 +90,7 @@ export const install = Effect.fn('install')(function* (extensionId: string) {
     home: homedir(),
     node: process.execPath,
     main: join(dirname(fileURLToPath(import.meta.url)), 'main.ts'),
-    extensionId,
+    extensionIds,
     ...(wsl ? { wsl } : {}),
   })
   for (const f of plan.files) {

@@ -5,7 +5,7 @@ import { Input } from '../components/ui/input.tsx'
 import { Textarea } from '../components/ui/textarea.tsx'
 import { cn } from '../lib/utils.ts'
 import { Button, Spinner } from '../ui/index.tsx'
-import { companion, loadSettings, saveSettings } from './store.ts'
+import { companion, ext, loadSettings, saveSettings } from './store.ts'
 
 const lines = (s: string) => s.split('\n').map((l) => l.trim()).filter(Boolean)
 const envText = (env: Readonly<Record<string, string>>) => Object.entries(env).map(([k, v]) => `${k}=${v}`).join('\n')
@@ -144,7 +144,7 @@ export function SettingsPage() {
     setStatus({ tone: 'busy', text: 'Saving…' })
     // Hosts other than github.com need the browser's permission to open their PR pages here.
     const origins = settings.hosts.filter((h) => h !== 'github.com').map((h) => `https://${h}/*`)
-    const granted = origins.length === 0 || (await chrome.permissions.request({ origins }).catch(() => false))
+    const granted = origins.length === 0 || (await ext().permissions.request({ origins }).catch(() => false))
     await Effect.runPromise(Effect.result(saveSettings(settings))).then((r) =>
       setStatus(
         r._tag === 'Failure'

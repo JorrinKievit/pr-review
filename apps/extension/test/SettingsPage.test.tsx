@@ -12,21 +12,23 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-const setup = (o: { stored?: Settings; copy?: Settings | null; pool?: AccountStatus[] }) => {
+const setup = (o: { stored?: Settings; copy?: Settings | null; pool?: AccountStatus[]; silent?: boolean; storageFails?: boolean }) => {
   const storage: Record<string, unknown> = o.stored ? { settings: o.stored } : {}
   const configured: Settings[] = []
   const requested: string[][] = []
   const companion = fakeCompanion({
-    handlers: { GetSettings: () => Effect.succeed(o.copy ?? null), PoolStatus: () => Effect.succeed(o.pool ?? []), Configure: ({ settings }) => Effect.sync(() => void configured.push(settings)) },
+    handlers: { GetSettings: () => (o.silent ? Effect.never : Effect.succeed(o.copy ?? null)), PoolStatus: () => Effect.succeed(o.pool ?? []), Configure: ({ settings }) => Effect.sync(() => void configured.push(settings)) },
   })
   const scope = Effect.runSync(Scope.make())
   scopes.push(scope)
   Effect.runSync(Layer.buildWithScope(companion.server, scope))
-  vi.stubGlobal('chrome', {
-    storage: { local: { get: async (k: string) => (k in storage ? { [k]: storage[k] } : {}), set: async (v: Record<string, unknown>) => void Object.assign(storage, v) } },
+  const api = {
+    storage: { local: { get: async (k: string) => { if (o.storageFails) throw new Error('storage is unavailable'); return k in storage ? { [k]: storage[k] } : {} }, set: async (v: Record<string, unknown>) => void Object.assign(storage, v) } },
     runtime: { connect: () => companion.hub.connect() },
     permissions: { request: async (p: { origins: string[] }) => (requested.push(p.origins), true) },
-  })
+  }
+  vi.stubGlobal('chrome', api)
+  vi.stubGlobal('browser', api)
   render(<SettingsPage />)
   return { storage, configured, requested }
 }
@@ -55,3 +57,13 @@ test('an account at its limit says until when it sits out', async () => {
   const line = await screen.findByText(/Sitting out until/, {}, { timeout: 3000 })
   expect(line).toHaveAttribute('title', "You've hit your usage limit")
 })
+
+test('a companion that never answers does not keep the page loading', async () => {
+  setup({ silent: true })
+  expect(await screen.findByLabelText('Hosts', {}, { timeout: 8000 })).toHaveValue('github.com')
+}, 10_000)
+
+test('storage that fails still shows the settings', async () => {
+  setup({ storageFails: true })
+  expect(await screen.findByLabelText('Hosts', {}, { timeout: 8000 })).toHaveValue('github.com')
+}, 10_000)

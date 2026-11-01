@@ -4,7 +4,7 @@ afterEach(() => vi.unstubAllGlobals())
 
 test('only granted hosts besides github.com get the content script, and a second call replaces the first', async () => {
   let scripts: Array<{ id: string; matches: string[] }> = []
-  vi.stubGlobal('chrome', {
+  const api = {
     permissions: { contains: async (p: { origins: string[] }) => p.origins[0] !== 'https://denied.example/*' },
     scripting: {
       getRegisteredContentScripts: async ({ ids }: { ids: string[] }) => scripts.filter((s) => ids.includes(s.id)),
@@ -14,7 +14,9 @@ test('only granted hosts besides github.com get the content script, and a second
         scripts.push(...s)
       },
     },
-  })
+  }
+  vi.stubGlobal('chrome', api)
+  vi.stubGlobal('browser', api)
   await registerHosts(['github.com', 'git.example.com', 'denied.example'])
   expect(scripts.map((s) => s.matches)).toEqual([['https://git.example.com/*/*/pull/*']])
   await registerHosts(['github.com', 'other.example'])

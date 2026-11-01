@@ -1,0 +1,23 @@
+{
+  "name": "pr-review",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@12.3.4",
+  "engines": {
+    "node": ">=24.18"
+  },
+  "scripts": {
+    "build": "turbo run build",
+    "test": "turbo run test",
+    "typecheck": "turbo run typecheck",
+    "dev": "turbo run dev"
+  },
+  "devDependencies": {
+    "@effect/language-service": "^0.87.5",
+    "@effect/vitest": "~4.1.1",
+    "@types/node": "^24.19.2",
+    "turbo": "^2.11.10",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.12"
+  }
+}

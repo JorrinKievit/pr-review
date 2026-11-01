@@ -1,0 +1,17 @@
+{
+  "name": "@pr-review/companion",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "^2.2.0",
+    "@effect/platform-node": "~4.1.1",
+    "@pr-review/domain": "workspace:*",
+    "@pr-review/native-messaging": "workspace:*",
+    "effect": "~4.1.1",
+    "octokit": "^5.0.5"
+  }
+}

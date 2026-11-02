@@ -378,6 +378,29 @@ test('coming back to a PR opens where the review left off, with the unsent summa
   expect(screen.getByRole('textbox', { name: 'Review summary' })).toHaveValue('Nearly there')
 })
 
+test('decisions sharing a theme sit under one sidebar row that opens on the selected one', async () => {
+  const themed = (id: string, theme: string): Decision => ({ ...decision(id, 'api.ts'), theme })
+  renderPage({
+    sort: Stream.concat(
+      Stream.make({ ...done, result: { ...sorted, decisions: [themed('model', 'Data'), themed('client', 'API'), themed('migration', 'Data')] } } as SortEvent),
+      Stream.never,
+    ),
+  })
+  await heading('Decision model')
+  const nav = screen.getByRole('navigation', { name: 'Review items' })
+  // The theme of the open decision is expanded, its decisions next to each other; a lone decision needs no theme row.
+  expect(within(nav).getByRole('button', { name: /^Data/ })).toHaveAttribute('aria-expanded', 'true')
+  expect(within(within(nav).getByRole('group', { name: 'Data' })).getAllByRole('button').map((b) => b.textContent)).toEqual(['Decision model', 'Decision migration'])
+  expect(within(nav).queryByRole('button', { name: /^API/ })).toBeNull()
+  await userEvent.keyboard('j')
+  expect(await heading('Decision migration')).toBeInTheDocument()
+  await userEvent.keyboard('j')
+  expect(await heading('Decision client')).toBeInTheDocument()
+  expect(within(nav).queryByRole('group', { name: 'Data' })).toBeNull()
+  await userEvent.click(within(nav).getByRole('button', { name: /^Data/ }))
+  expect(await heading('Decision model')).toBeInTheDocument()
+})
+
 test('j and k move between items', async () => {
   renderPage()
   await heading('Decision one')

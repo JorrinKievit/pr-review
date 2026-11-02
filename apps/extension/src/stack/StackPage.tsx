@@ -42,10 +42,10 @@ export function StackPage({ prRef }: { prRef: PrRef }) {
         <Spinner /> Finding the stack for #{prRef.number}…
       </main>
     )
-  return <Loaded prRef={prRef} entries={stack.value.entries} overview={stack.value.overview} />
+  return <Loaded prRef={prRef} entries={stack.value.entries} overview={stack.value.overview} overviewError={stack.value.overviewError} />
 }
 
-function Loaded({ prRef, entries, overview }: { prRef: PrRef; entries: ReadonlyArray<StackEntryStatus>; overview: StackOverview | null }) {
+function Loaded({ prRef, entries, overview, overviewError }: { prRef: PrRef; entries: ReadonlyArray<StackEntryStatus>; overview: StackOverview | null; overviewError?: string | undefined }) {
   const { stateAtom } = useAtoms()
   const saveState = useAtomSet(stateAtom)
   // Stack order; inside a PR decisions (architecture first), then skim areas and trusted groups.
@@ -256,7 +256,7 @@ function Loaded({ prRef, entries, overview }: { prRef: PrRef; entries: ReadonlyA
               {failed.length === 1 ? `#${failed[0]!.pr.number} could not be sorted` : `${failed.length} PRs could not be sorted`}: {failed[0]!.error}
             </p>
           )}
-          {sel.kind === 'overview' && <Overview entries={entries} overview={overview} progress={progress} onOpen={goPr} />}
+          {sel.kind === 'overview' && <Overview entries={entries} overview={overview} overviewError={overviewError} progress={progress} onOpen={goPr} />}
           {active && sel.kind !== 'overview' && (
             <PrBar prRef={prRef} entry={active} position={prIndex + 1} count={entries.length} dependents={row && decision ? dependentsOf(decision, row.pr.number, files) : []} onStep={stepPr} reviewOpen={reviewOpen} onReviewOpenChange={setReviewOpen} onSent={() => stepPr(1)} />
           )}

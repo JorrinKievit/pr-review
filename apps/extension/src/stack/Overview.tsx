@@ -34,6 +34,7 @@ export function PrLine({ entry }: { entry: StackEntryStatus }) {
 export function Overview(props: {
   entries: ReadonlyArray<StackEntryStatus>
   overview: StackOverview | null
+  overviewError?: string | undefined
   progress: (pr: number) => { decided: number; total: number }
   onOpen: (pr: number) => void
 }) {
@@ -109,9 +110,11 @@ export function Overview(props: {
             ),
           )}
         </>
+      ) : props.overviewError ? (
+        <p className="mb-4 text-muted-foreground">No stack summary: {props.overviewError.replace(/\.$/, '')}. Reload the page to try again.</p>
       ) : pending || results.length > 0 ? (
         <p className="mb-4 flex items-center gap-2 text-muted-foreground">
-          <Spinner className="size-3" /> The stack summary follows once every PR is sorted.
+          <Spinner className="size-3" /> {pending ? 'The stack summary follows once every PR is sorted.' : 'Writing the stack summary…'}
         </p>
       ) : (
         <p className="mb-4 text-muted-foreground">No stack summary: no PR in the stack could be sorted.</p>

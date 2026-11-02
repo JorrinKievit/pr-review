@@ -2,7 +2,7 @@ import { useAtomSet } from '@effect/atom-react'
 import { Popover } from '@base-ui/react/popover'
 import type { PrRef, PrView } from '@pr-review/domain'
 import { Exit } from 'effect'
-import { useState } from 'react'
+import { useLayoutEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
 import { useAtoms } from '../atoms.ts'
 import { useRemembered } from '../remembered.ts'
@@ -25,6 +25,11 @@ export function ReviewPopover({ prRef, pr, onSent, ...control }: { prRef: PrRef;
   const [body, setBody] = useRemembered(`summary:${prRef.host}/${prRef.owner}/${prRef.repo}#${prRef.number}`, '')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string>()
+  const trigger = useRef<HTMLButtonElement>(null)
+  // In the stack view the trigger scrolls with the pane; opened off-screen, the popup stays hidden and unfocused.
+  useLayoutEffect(() => {
+    if (open) trigger.current?.scrollIntoView({ block: 'nearest' })
+  }, [open])
   const own = pr.author === pr.viewer
   const events: ReadonlyArray<Event> = own ? ['COMMENT'] : ['COMMENT', 'REQUEST_CHANGES', 'APPROVE']
   const empty = !body.trim() && drafts.length === 0
@@ -52,6 +57,7 @@ export function ReviewPopover({ prRef, pr, onSent, ...control }: { prRef: PrRef;
   return (
     <Popover.Root open={open} onOpenChange={setOpen}>
       <Popover.Trigger
+        ref={trigger}
         render={
           <Button size="xs">
             Review{drafts.length > 0 && <span className="rounded-sm bg-primary-foreground/20 px-1 tabular-nums">{drafts.length}</span>}

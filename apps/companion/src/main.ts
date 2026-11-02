@@ -14,6 +14,7 @@ import { GitHub } from './GitHub.ts'
 import { CompanionRpcs, HandlersLive, LoggedLive, VERSION } from './handlers.ts'
 import { defaultExtensionId, install } from './install.ts'
 import { Overview } from './Overview.ts'
+import { loginPath } from './shellPath.ts'
 import { Sorter } from './Sorter.ts'
 import { Store } from './Store.ts'
 
@@ -36,6 +37,8 @@ const fileLogger = Logger.layer([Logger.toFile(Logger.formatSimple, join(default
 
 const host = Command.make('host', {}, () =>
   Effect.gen(function* () {
+    // Started now so the first agent rarely waits for it.
+    void loginPath()
     const port = streamPort(process.stdin, process.stdout)
     const server = portServer(CompanionRpcs, HandlersLive.pipe(Layer.provide(services)), singlePort(port)).pipe(Layer.provide(LoggedLive))
     yield* Effect.log(`host ${VERSION} started`)

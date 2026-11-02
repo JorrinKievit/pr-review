@@ -14,7 +14,13 @@ export const description: Item = { kind: 'description', key: 'about' }
 export function buildItems(pr: PrView, sort: SortEvent | undefined): ReadonlyArray<Item> {
   const about = pr.body.trim() ? [description] : []
   if (sort?._tag !== 'Done') return [...about, { kind: 'unsorted', key: 'unsorted', files: pr.files.map((f) => f.path) }]
-  return [...about, ...itemsOf(sort.result)]
+  return [...about, ...itemsOf(sort.result, byTheme)]
+}
+
+/** Decisions of a theme next to each other, themes in the order Claude first named them. */
+export const byTheme = (ds: ReadonlyArray<Decision>) => {
+  const order = [...new Set(ds.map((d) => d.theme))]
+  return [...ds].sort((a, b) => order.indexOf(a.theme) - order.indexOf(b.theme))
 }
 
 /** Where a PR opens: on its first item until reviewing has started, then on the first item still open. */

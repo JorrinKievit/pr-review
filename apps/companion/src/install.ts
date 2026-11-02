@@ -24,13 +24,14 @@ const manifestFile = `${HOST_NAME}.json`
 const firefoxManifestFile = `${HOST_NAME}.firefox.json`
 
 /**
- * Browsers start the host with a bare PATH, so the launcher names node by absolute path.
+ * Browsers start the host with a bare PATH, so the launcher names node by absolute path and restores the installer's PATH:
+ * without it an agent command like `npx` resolves to whatever the bare PATH has (under WSL, Windows' node.exe).
  * Chromium browsers share one manifest, Firefox gets its own. Under WSL the browser runs on Windows: both point at a .bat
  * that enters the distro, registered in HKCU.
  */
-export function installTargets(o: { platform: NodeJS.Platform; home: string; node: string; main: string; extensionIds: ReadonlyArray<string>; wsl?: Wsl }): InstallPlan {
+export function installTargets(o: { platform: NodeJS.Platform; home: string; node: string; main: string; path: string; extensionIds: ReadonlyArray<string>; wsl?: Wsl }): InstallPlan {
   const launcher = join(o.home, '.local', 'share', 'pr-review', 'pr-review-host')
-  const script = { path: launcher, content: `#!/bin/sh\nexec '${o.node}' '${o.main}' host\n`, executable: true }
+  const script = { path: launcher, content: `#!/bin/sh\nexport PATH='${o.path}'\nexec '${o.node}' '${o.main}' host\n`, executable: true }
   const manifest = (path: string) => JSON.stringify(hostManifest({ path, extensionIds: o.extensionIds }), null, 2)
   const firefox = (path: string) => JSON.stringify(firefoxHostManifest(path), null, 2)
 
@@ -90,6 +91,7 @@ export const install = Effect.fn('install')(function* (extensionIds: ReadonlyArr
     home: homedir(),
     node: process.execPath,
     main: join(dirname(fileURLToPath(import.meta.url)), 'main.ts'),
+    path: process.env.PATH ?? '',
     extensionIds,
     ...(wsl ? { wsl } : {}),
   })

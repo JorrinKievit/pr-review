@@ -30,6 +30,16 @@ Read how this codebase wants things done, at the default branch (never at the PR
 
 A file can belong to several decisions. A file that is in a decision should not also be in skim. **When in doubt, make it a decision.**
 
+## How fine to cut
+
+Every item is a stop for the reviewer, so cut along what they will judge, not along files.
+
+- One decision per choice the reviewer accepts or pushes back on as a whole. Merge candidates that would always get the same verdict, or that cannot be judged one without the other (a new helper and the call sites that adopt it, a migration and the entity it changes).
+- A small change that only follows from a bigger decision (a config line, a registration, a type tweak) goes into that decision's `files`, not into a decision of its own.
+- A PR rarely makes more than five or six decisions. More than that usually means they are cut too fine; check before you return them, but never drop a real decision to hit a number.
+- Decisions a reviewer would read together share a `theme`. A theme holds related decisions; it does not replace merging them.
+- A skim area of one or two files joins the nearest related area unless it truly stands alone.
+
 ## Each decision
 
 - `title`: what was decided, in a few words ("Second bracket/token system", "Planning API client patches the spec").

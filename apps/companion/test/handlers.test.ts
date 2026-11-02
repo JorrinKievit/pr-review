@@ -1,5 +1,5 @@
 import { assert, describe, it } from '@effect/vitest'
-import { type AgentSort, type Decision, type FileStat, ReviewRejected, ReviewRpcs, RepoNotConfigured, type StackEntry } from '@pr-review/domain'
+import { AgentError, type AgentSort, type Decision, type FileStat, ReviewRejected, ReviewRpcs, RepoNotConfigured, type StackEntry } from '@pr-review/domain'
 import { Effect, Fiber, Layer, Logger, Stream } from 'effect'
 import { KeyValueStore } from 'effect/persistence'
 import { RpcTest } from 'effect/rpc'
@@ -16,11 +16,13 @@ const files = [{ path: 'src/a.ts', additions: 3, deletions: 1 }]
 const sortReply = { decisions: [], skim: [], claims: [] }
 
 const setup = (
-  o: { delay?: number; github?: Parameters<typeof fakeGitHub>[0]; sorts?: ReadonlyArray<AgentSort>; files?: FileStat[]; diff?: NonNullable<Parameters<typeof fakeGit>[0]>['diff']; git?: ReturnType<typeof fakeGit> } = {},
+  o: { delay?: number; overviewFails?: string; github?: Parameters<typeof fakeGitHub>[0]; sorts?: ReadonlyArray<AgentSort>; files?: FileStat[]; diff?: NonNullable<Parameters<typeof fakeGit>[0]>['diff']; git?: ReturnType<typeof fakeGit> } = {},
 ) => {
   let sorted = 0
   const agent = fakeAgent((call) =>
-    Effect.as(o.delay ? Effect.sleep(o.delay) : Effect.void, call.log.kind === 'overview' ? overviewReply : (o.sorts?.[sorted++] ?? sortReply)),
+    call.log.kind === 'overview' && o.overviewFails
+      ? Effect.fail(new AgentError({ message: o.overviewFails }))
+      : Effect.as(o.delay ? Effect.sleep(o.delay) : Effect.void, call.log.kind === 'overview' ? overviewReply : (o.sorts?.[sorted++] ?? sortReply)),
   )
   const deps = Layer.mergeAll(agent.layer, (o.git ?? fakeGit({ files: o.files ?? files, diff: o.diff ?? 'd' })).layer, fakeGitHub({ listOpenPrs: () => Effect.succeed([entry(7, 'master', 'feat')]), ...o.github }), configLayer())
   const store = Store.layerWith(KeyValueStore.layerMemory)
@@ -111,6 +113,15 @@ describe('handlers', () => {
       const last = events.at(-1)!
       assert.deepStrictEqual(last.entries.map((e) => [e.pr.number, e.status]), [[7, 'done'], [8, 'done']])
       assert.deepStrictEqual(last.overview, overviewReply)
+    }).pipe(Effect.scoped))
+
+  it.live('Stack ends with why the overview failed, so the page stops waiting for it', () =>
+    Effect.gen(function* () {
+      const c = yield* setup({ overviewFails: 'Claude took longer than 10 minutes' }).client
+      const last = (yield* Stream.runCollect(c.Stack({ ref }))).at(-1)!
+      assert.deepStrictEqual(last.entries.map((e) => e.status), ['done'])
+      assert.strictEqual(last.overview, null)
+      assert.strictEqual(last.overviewError, 'Claude took longer than 10 minutes')
     }).pipe(Effect.scoped))
 
   it.live('Stack entries carry the saved verdicts of each PR', () =>

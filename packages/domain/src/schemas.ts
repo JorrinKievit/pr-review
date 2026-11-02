@@ -206,5 +206,7 @@ export type StackEntryStatus = typeof StackEntryStatus.Type
 export const StackEvent = Schema.Struct({
   entries: Schema.Array(StackEntryStatus),
   overview: Schema.NullOr(StackOverview),
+  /** Set when the overview could not be written; the stream ends without one. */
+  overviewError: Schema.optional(Schema.String),
 })
 export type StackEvent = typeof StackEvent.Type

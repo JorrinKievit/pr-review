@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url'
 import { extensionIdFromKey, firefoxHostManifest, hostManifest, installTargets } from '../src/install.ts'
 import { tmp } from './helpers.ts'
 
-const launch = { node: '/usr/bin/node', main: '/repo/apps/companion/src/main.ts', path: '/home/u/.nvm/bin:/usr/bin:/mnt/c/Program Files (x86)/x' }
+const launch = { node: '/usr/bin/node', main: '/repo/apps/companion/src/main.ts' }
 const launcher = '/home/u/.local/share/pr-review/pr-review-host'
 
 describe('install', () => {
@@ -34,9 +34,9 @@ describe('install', () => {
     })
   })
 
-  it('the launcher runs main.ts host with an absolute node and the installer\'s PATH', () => {
+  it('the launcher runs main.ts host with an absolute node', () => {
     const [script] = installTargets({ platform: 'linux', home: '/home/u', ...launch, extensionIds: ['abc'] }).files
-    assert.deepStrictEqual(script, { path: launcher, content: `#!/bin/sh\nexport PATH='/home/u/.nvm/bin:/usr/bin:/mnt/c/Program Files (x86)/x'\nexec '/usr/bin/node' '/repo/apps/companion/src/main.ts' host\n`, executable: true })
+    assert.deepStrictEqual(script, { path: launcher, content: `#!/bin/sh\nexec '/usr/bin/node' '/repo/apps/companion/src/main.ts' host\n`, executable: true })
   })
 
   it('linux targets chrome, chromium, edge and firefox', () => {
@@ -71,7 +71,7 @@ describe('install', () => {
       wsl: { distro: 'Ubuntu', localAppData: { linux: '/mnt/c/Users/u/AppData/Local', windows: 'C:\\Users\\u\\AppData\\Local' } },
     })
     const [script, bat, manifest, firefox] = t.files
-    assert.strictEqual(script!.content, `#!/bin/sh\nexport PATH='/home/u/.nvm/bin:/usr/bin:/mnt/c/Program Files (x86)/x'\nexec '/usr/bin/node' '/repo/apps/companion/src/main.ts' host\n`)
+    assert.strictEqual(script!.content, `#!/bin/sh\nexec '/usr/bin/node' '/repo/apps/companion/src/main.ts' host\n`)
     assert.strictEqual(bat!.path, '/mnt/c/Users/u/AppData/Local/pr-review/pr-review-host.bat')
     assert.strictEqual(bat!.content, `@wsl.exe -d Ubuntu -e ${launcher}\r\n`)
     assert.strictEqual(manifest!.path, '/mnt/c/Users/u/AppData/Local/pr-review/pr_review.json')

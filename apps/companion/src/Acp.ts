@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process'
 import { homedir } from 'node:os'
 import { Readable, Writable } from 'node:stream'
 import { safeGitCommand } from './gitOnly.ts'
+import { loginPath } from './shellPath.ts'
 import { describeTool } from './steps.ts'
 
 export type AcpUpdate = { readonly _tag: 'Text'; readonly delta: string } | { readonly _tag: 'Step'; readonly step: string }
@@ -37,10 +38,11 @@ const toUpdate = (u: acp.SessionUpdate, seen: Set<string>): AcpUpdate | undefine
 
 const expandHome = (v: string) => (v === '~' || v.startsWith('~/') ? homedir() + v.slice(1) : v)
 
-/** Starts `account.command` through the shell. Keys that would bill an API instead of the login are left out. */
+/** Starts `account.command` through the shell, on the user's own PATH. Keys that would bill an API instead of the login are left out. */
 export const spawnAgent: Launch = (account, cwd) =>
   Effect.gen(function* () {
-    const env = { ...process.env, ...Object.fromEntries(Object.entries(account.env).map(([k, v]) => [k, expandHome(v)])) }
+    const PATH = (yield* Effect.promise(loginPath)) ?? process.env.PATH
+    const env: NodeJS.ProcessEnv = { ...process.env, PATH, ...Object.fromEntries(Object.entries(account.env).map(([k, v]) => [k, expandHome(v)])) }
     for (const key of ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY']) if (!(key in account.env)) delete env[key]
     const child = yield* Effect.acquireRelease(
       Effect.sync(() => spawn(account.command, { shell: true, cwd, env, stdio: ['pipe', 'pipe', 'pipe'] })),

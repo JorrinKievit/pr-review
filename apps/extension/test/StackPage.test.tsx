@@ -178,13 +178,20 @@ test('accepting the last open item of a PR without comments moves on to the next
   expect(screen.queryByRole('textbox', { name: 'Review summary' })).toBeNull()
 })
 
-test('with comments pending, the last accept opens the review, and sending it moves on to the next PR', async () => {
+test('with comments pending, the last accept opens the review in view, and sending it moves on to the next PR', async () => {
+  const scrolled: Element[] = []
+  const spy = vi.spyOn(Element.prototype, 'scrollIntoView').mockImplementation(function (this: Element) {
+    scrolled.push(this)
+  })
+  onTestFinished(() => spy.mockRestore())
   const { reviews } = renderStack([twoPrs], { drafts: [{ id: 'x', path: 'fmt.php', line: 1, side: 'RIGHT', body: 'Rename this' }] })
   const nav = await screen.findByRole('navigation', { name: 'Stack' }, { timeout: 3000 })
   await userEvent.click(within(nav).getByRole('button', { name: /#2567/ }))
   await screen.findByRole('heading', { name: 'Decision fmt' })
   await userEvent.keyboard('a')
-  await screen.findByRole('textbox', { name: 'Review summary' }, { timeout: 3000 })
+  await waitFor(() => expect(screen.getByRole('textbox', { name: 'Review summary' })).toHaveFocus(), { timeout: 3000 })
+  // The Review button sits at the top of the scrolled pane; a popover anchored off-screen never shows.
+  expect(scrolled).toContain(screen.getByRole('button', { name: /^Review/ }))
   await userEvent.click(screen.getByRole('button', { name: 'Request changes' }))
   await screen.findByRole('heading', { name: 'Decision meter' }, { timeout: 3000 })
   expect(reviews).toEqual([2567])

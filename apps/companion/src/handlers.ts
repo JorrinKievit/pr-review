@@ -229,7 +229,8 @@ export const HandlersLive = ReviewRpcs.toLayer(
             const { stack } = yield* openStack(ref)
             const entries: StackEntryStatus[] = stack.map((pr) => ({ pr, status: 'queued', result: null, error: null, state: {} }))
             let overviewResult: StackEvent['overview'] = null
-            const emit = () => Queue.offer(queue, { entries: [...entries], overview: overviewResult })
+            let overviewError: string | undefined
+            const emit = () => Queue.offer(queue, { entries: [...entries], overview: overviewResult, ...(overviewError ? { overviewError } : {}) })
             yield* emit()
 
             const sorted: OverviewEntry[] = []
@@ -264,7 +265,12 @@ export const HandlersLive = ReviewRpcs.toLayer(
 
             const done = sorted.filter(Boolean)
             if (done.length) {
-              overviewResult = yield* overview.make(ref, done).pipe(Effect.orElseSucceed(() => null))
+              const made = yield* overview.make(ref, done).pipe(Effect.result)
+              if (made._tag === 'Success') overviewResult = made.success
+              else {
+                overviewError = made.failure.message
+                yield* Effect.logWarning(`Overview #${ref.number} failed: ${overviewError}`)
+              }
               yield* emit()
             }
             yield* Queue.end(queue)

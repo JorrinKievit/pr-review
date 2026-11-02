@@ -67,6 +67,18 @@ test('the overview maps every PR bottom to top with what it does', async () => {
   expect(screen.getByText('Adds credits.')).toBeInTheDocument()
 })
 
+test('a stack summary that could not be written says why instead of waiting forever', async () => {
+  renderStack([
+    {
+      entries: [{ pr: pr(2567), status: 'done', result: result([decision('money', 'architecture', 'Data model')]), error: null, state: {} }],
+      overview: null,
+      overviewError: 'Claude took longer than 10 minutes',
+    },
+  ])
+  expect(await screen.findByText(/No stack summary: Claude took longer than 10 minutes/, {}, { timeout: 3000 })).toBeInTheDocument()
+  expect(screen.queryByText(/follows once every PR is sorted/)).toBeNull()
+})
+
 test('the stack summary reads as name and what changed, not one string per line', async () => {
   renderStack([
     {

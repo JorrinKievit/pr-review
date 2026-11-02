@@ -433,10 +433,18 @@ test('j and k are ignored while typing', async () => {
   await waitFor(() => expect(screen.getByRole('heading', { name: 'Decision one' })).toBeInTheDocument())
 })
 
-test('shows setup when companion is unavailable', async () => {
+test('without a companion, setup says why one is needed and gives the line that installs this release of it', async () => {
   renderPage({ getPr: () => Effect.fail(new CompanionUnavailable({ reason: 'not-installed' })) })
-  expect(await screen.findByText(/pr-review install/, {}, { timeout: 3000 })).toBeInTheDocument()
+  expect(await screen.findByRole('heading', { name: 'Install the companion' }, { timeout: 3000 })).toBeInTheDocument()
+  expect(screen.getByText(/don't let an extension register one itself/)).toBeInTheDocument()
+  expect(screen.getByText(/^curl /).textContent).toBe('curl -fsSL https://github.com/JorrinKievit/pr-review/releases/download/v0.3.0/install.sh | sh -s -- --extension-id test-extension-id')
   expect(screen.getByRole('link', { name: /Open on GitHub/ })).toHaveAttribute('href', 'https://github.com/acme/core/pull/7/files?native=1')
+})
+
+test('a companion from another release gets the same line to update it', async () => {
+  renderPage({ getPr: () => Effect.fail(new CompanionUnavailable({ reason: 'mismatch' })) })
+  expect(await screen.findByRole('heading', { name: 'Update the companion' }, { timeout: 3000 })).toBeInTheDocument()
+  expect(screen.getByText(/^curl /).textContent).toMatch(/v0\.3\.0\/install\.sh \| sh/)
 })
 
 test('an item changed since it was pushed back opens as a follow-up: what you said, then what changed since', async () => {

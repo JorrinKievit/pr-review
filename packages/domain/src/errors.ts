@@ -16,5 +16,6 @@ export class ReviewRejected extends Schema.TaggedError<ReviewRejected>()('Review
 export class AgentError extends Schema.TaggedError<AgentError>()('AgentError', { message: Schema.String }) {}
 
 export class CompanionUnavailable extends Schema.TaggedError<CompanionUnavailable>()('CompanionUnavailable', {
-  reason: Schema.Literals(['not-installed', 'disconnected']),
+  /** `mismatch`: the companion is from another release than the extension. */
+  reason: Schema.Literals(['not-installed', 'disconnected', 'mismatch']),
 }) {}

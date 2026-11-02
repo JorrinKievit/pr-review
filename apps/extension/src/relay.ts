@@ -1,6 +1,6 @@
 import { CompanionUnavailable, ReviewRpcs, type Settings } from '@pr-review/domain'
 import { makePortClient, type OnConnectLike, type PortLike, portServer } from '@pr-review/native-messaging'
-import { Deferred, Effect, Exit, Fiber, Layer, Scope, Semaphore, Stream } from 'effect'
+import { Deferred, Effect, Exit, Fiber, Layer, Option, Scope, Semaphore, Stream } from 'effect'
 import type { RpcClient, RpcClientError, RpcGroup } from 'effect/rpc'
 
 /** A native port plus what Chrome said when it failed (`chrome.runtime.lastError`). */
@@ -23,7 +23,7 @@ type Connection = { client: Client; scope: Scope.Closeable; died: Deferred.Defer
  * opened on first use and closed `IDLE` after the last page leaves. A dead host fails calls with
  * CompanionUnavailable; the next call reconnects.
  */
-export const relay = (native: NativeConnect, pages: OnConnectLike, settings: Effect.Effect<Settings | undefined> = Effect.succeed(undefined)) =>
+export const relay = (native: NativeConnect, pages: OnConnectLike, settings: Effect.Effect<Settings | undefined> = Effect.succeed(undefined), version?: string) =>
   Layer.unwrap(
     Effect.gen(function* () {
       const services = yield* Effect.context<never>()
@@ -72,6 +72,12 @@ export const relay = (native: NativeConnect, pages: OnConnectLike, settings: Eff
         // Before any page's call: the companion runs on what the settings page saved. Without any, it keeps its own copy.
         const saved = yield* settings
         if (saved) yield* Effect.ignore(client.Configure({ settings: saved }))
+        // Both come from one release tag; a companion run from source reports 0.0.0 and works with any build.
+        const theirs = version ? (yield* Effect.option(client.Health())).pipe(Option.map((h) => h.version), Option.getOrUndefined) : undefined
+        if (theirs && theirs !== '0.0.0' && theirs !== version) {
+          yield* Scope.close(scope, Exit.void)
+          return yield* new CompanionUnavailable({ reason: 'mismatch' })
+        }
         current = connection
         return connection
       })

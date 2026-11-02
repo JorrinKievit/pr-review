@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "test": "vitest run --passWithNoTests",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "bundle": "rolldown -c"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^2.2.0",
@@ -13,5 +14,8 @@
     "@pr-review/native-messaging": "workspace:*",
     "effect": "~4.1.1",
     "octokit": "^5.0.5"
+  },
+  "devDependencies": {
+    "rolldown": "1.2.16"
   }
 }

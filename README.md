@@ -9,15 +9,37 @@ A Firefox and Chrome extension that replaces a pull request's "Files changed" pa
 
 ## Requirements
 
-- Node 24.18 or later and pnpm.
+- Node 24 or later. The companion runs on it, and so do most agent adapters.
 - `gh auth login --hostname <host>` and `gh auth setup-git --hostname <host>` for every GitHub host you review on. The companion reads the token from `gh` and clones over HTTPS.
 - At least one coding agent logged in with its own CLI (`claude`, `codex login`, `cursor-agent login`, …). The companion uses those logins and drops `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` from the agent's environment unless an account sets them.
 
 ## Install
 
+Install the extension, then open a PR's "Files changed" page. Until the companion is installed, the page shows the one line that installs it, with the extension's version and id filled in:
+
+```sh
+curl -fsSL https://github.com/JorrinKievit/pr-review/releases/download/v<version>/install.sh | sh
+```
+
+Run it in a terminal (inside WSL if that is where you work), then reload the page. When the extension updates to a new release, the page shows the line again so the companion matches it.
+
+### Why the companion needs installing
+
+The review runs on your machine: the companion clones the repo, runs git and starts your own agent logins. An extension can't do any of that itself. It can only talk to a local program that has been registered with the browser ([native messaging](https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/Native_messaging)). Registering means writing a small manifest file where each browser looks for one, or a registry key on Windows, and browsers deliberately don't let extensions write files or the registry. So one command run outside the browser has to do it, once. Password managers with a desktop app have the same step; their installer does it for you.
+
+`install.sh` downloads the companion of that release to `~/.local/share/pr-review/companion`, writes a launcher at `~/.local/share/pr-review/pr-review-host`, and writes a manifest per browser that names the launcher and the extension ids allowed to start it:
+
+- Chrome, Chromium and Edge: `~/.config/{google-chrome,chromium,microsoft-edge}/NativeMessagingHosts/pr_review.json` (`~/Library/Application Support/…/NativeMessagingHosts/` on macOS)
+- Firefox: `~/.mozilla/native-messaging-hosts/pr_review.json` (`~/Library/Application Support/Mozilla/NativeMessagingHosts/` on macOS)
+- WSL: see [WSL](#wsl)
+
+The browser starts the companion when a review tab connects and closes it five minutes after the last one goes away. Nothing runs in the background otherwise. To uninstall, delete `~/.local/share/pr-review` and those `pr_review.json` files.
+
+### From source
+
 ```sh
 pnpm i
-apps/companion/bin/pr-review install   # registers the native messaging host with Firefox, Chrome and Chromium
+apps/companion/bin/pr-review install   # registers the companion from this checkout with Firefox, Chrome and Chromium
 pnpm turbo build                       # builds .output/firefox-mv2 and .output/chrome-mv3
 ```
 
@@ -25,9 +47,7 @@ Firefox: open `about:debugging#/runtime/this-firefox`, click "Load Temporary Add
 
 Chrome: open `chrome://extensions`, turn on developer mode, and load `apps/extension/.output/chrome-mv3` unpacked.
 
-Both extension ids are pinned (`pr-review@jorrinkievit` in Firefox, a fixed key in Chrome), so `install` and the extension always agree.
-
-Store builds (see Release) get their ids from the Chrome Web Store and Edge Add-ons. Allow them with `pr-review install --extension-id <chrome-id>,<edge-id>`; the unpacked build stays allowed.
+Both extension ids are pinned (`pr-review@jorrinkievit` in Firefox, a fixed key in Chrome), so `install` and the extension always agree. Store builds get their ids from the Chrome Web Store and Edge Add-ons; the setup page passes its own with `--extension-id`. A companion run from source reports version 0.0.0 and works with any build of the extension.
 
 ## Settings
 
@@ -51,6 +71,7 @@ Keys: `j`/`k` move, `a` accepts, `p` pushes back, `⌘J` discusses, `⌘K` jumps
 
 | Path | What |
 | --- | --- |
+| `~/.local/share/pr-review/` | The installed companion and its launcher |
 | `~/.config/pr-review/settings.json` | The companion's copy of the settings |
 | `~/.cache/pr-review/repos/<host>/<owner>/<repo>.git` | Bare clones |
 | `~/.cache/pr-review/store` | Cached sorts, overviews, patches, decision states, chat sessions |
@@ -79,7 +100,7 @@ pnpm typecheck
 
 ## Release
 
-Push a `v*` tag (`git tag v0.2.0 && git push origin v0.2.0`). The Extension workflow tests, zips Chrome, Firefox (plus a sources zip for AMO) and Edge, attaches them to a GitHub release, and submits each to its store when that store's secrets are set:
+Push a `v*` tag (`git tag v0.2.0 && git push origin v0.2.0`). The Extension workflow tests, zips Chrome, Firefox (plus a sources zip for AMO) and Edge, and bundles the companion. It attaches the zips, `install.sh` and `pr-review-companion.tar.gz` to a GitHub release. The extension's setup page links `install.sh` from the release with its own version, so every release needs those two files. Each zip goes to its store when that store's secrets are set:
 
 | Store | Secrets |
 | --- | --- |

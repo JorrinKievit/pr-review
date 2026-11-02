@@ -148,6 +148,10 @@ importers:
       octokit:
         specifier: ^5.0.5
         version: 5.0.5
+    devDependencies:
+      rolldown:
+        specifier: 1.2.16
+        version: 1.2.16
 
   apps/extension:
     dependencies:

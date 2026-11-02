@@ -1,7 +1,8 @@
 name: Extension
 
-# A v* tag builds every browser, attaches the zips to a GitHub release and submits them to each store
-# whose secrets are set. Running it by hand does the same without the release.
+# A v* tag builds every browser and the companion, attaches the zips, install.sh and the companion bundle to a
+# GitHub release, and submits the zips to each store whose secrets are set. Running it by hand does the same
+# without the release.
 on:
   push:
     tags: ['v*']
@@ -42,17 +43,29 @@ jobs:
           pnpm zip
           echo "ZIPS=$PWD/.output/pr-review-$EXTENSION_VERSION" >> "$GITHUB_ENV"
 
+      # install.sh (linked from the extension's setup page) downloads this tarball from the same release.
+      - name: Bundle the companion
+        working-directory: apps/companion
+        run: |
+          export PR_REVIEW_VERSION="${EXTENSION_VERSION#v}"
+          pnpm bundle
+          mkdir -p release
+          tar -czf release/pr-review-companion.tar.gz dist prompts
+          sed "s/__VERSION__/$PR_REVIEW_VERSION/" install.sh > release/install.sh
+
       - uses: actions/upload-artifact@v7
         with:
           name: extension
-          path: apps/extension/.output/*.zip
+          path: |
+            apps/extension/.output/*.zip
+            apps/companion/release/*
           include-hidden-files: true
 
       - name: GitHub release
         if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" apps/extension/.output/*.zip --generate-notes
+        run: gh release create "$GITHUB_REF_NAME" apps/extension/.output/*.zip apps/companion/release/* --generate-notes
 
       - name: Submit to the stores
         if: github.ref_type == 'tag' || inputs.publish

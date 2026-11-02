@@ -12,7 +12,8 @@ import { Sorter } from './Sorter.ts'
 import { buildStack } from './stack.ts'
 import { cacheOptions, type Chats, type OverviewEntry, PatchKey, Store, storeFailuresDie } from './Store.ts'
 
-export const VERSION = '0.1.0'
+/** Set by the release bundle; 0.0.0 is a companion run from source. */
+export const VERSION = process.env.PR_REVIEW_VERSION ?? '0.0.0'
 
 const repoKeyOf = (ref: PrRef) => `${ref.host}/${ref.owner}/${ref.repo}`
 const prKey = (ref: PrRef) => `${repoKeyOf(ref)}#${ref.number}`

@@ -2,9 +2,9 @@ import { EXTENSION_KEY, GECKO_ID, HOST_NAME } from '@pr-review/domain'
 import { Effect, FileSystem, Stream } from 'effect'
 import { ChildProcess, ChildProcessSpawner } from 'effect/process'
 import { createHash } from 'node:crypto'
+import { realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
 
 /** Chrome's id for an extension: the first 32 hex digits of sha256(public key), mapped 0-f to a-p. */
 export const extensionIdFromKey = (key: string) =>
@@ -89,7 +89,8 @@ export const install = Effect.fn('install')(function* (extensionIds: ReadonlyArr
     platform: process.platform,
     home: homedir(),
     node: process.execPath,
-    main: join(dirname(fileURLToPath(import.meta.url)), 'main.ts'),
+    // The file this runs from: src/main.ts in a checkout, dist/main.mjs from a release.
+    main: realpathSync(process.argv[1]!),
     extensionIds,
     ...(wsl ? { wsl } : {}),
   })

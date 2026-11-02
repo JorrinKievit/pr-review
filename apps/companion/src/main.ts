@@ -58,7 +58,7 @@ const installCommand = Command.make(
   },
   ({ extensionIds }) =>
     Effect.gen(function* () {
-      const ids = [defaultExtensionId, ...extensionIds.split(',').map((id) => id.trim()).filter(Boolean)]
+      const ids = [...new Set([defaultExtensionId, ...extensionIds.split(',').map((id) => id.trim()).filter(Boolean)])]
       const plan = yield* install(ids)
       for (const f of plan.files) yield* Console.log(`Wrote ${f.path}`)
       for (const r of plan.registry) yield* Console.log(`Registered ${r.key}`)

@@ -10,9 +10,15 @@ import { fakeCompanion } from './companion.ts'
 const ref = { host: 'h', owner: 'o', repo: 'r', number: 7 }
 const flush = Effect.promise(() => new Promise((r) => setTimeout(r, 50)))
 
-const setup = (o: { onSortEnd?: () => void; settings?: Settings; configured?: Settings[] } = {}) =>
+const setup = (o: { onSortEnd?: () => void; settings?: Settings; configured?: Settings[]; version?: string; companionVersion?: string } = {}) =>
   Effect.gen(function* () {
-    const companion = fakeCompanion({ ...o, handlers: { Configure: ({ settings }) => Effect.sync(() => void o.configured?.push(settings)) } })
+    const companion = fakeCompanion({
+      ...o,
+      handlers: {
+        Configure: ({ settings }) => Effect.sync(() => void o.configured?.push(settings)),
+        ...(o.companionVersion ? { Health: () => Effect.succeed({ version: o.companionVersion! }) } : {}),
+      },
+    })
     yield* Layer.build(companion.server)
     const native = { opened: 0, closed: 0 }
     companion.hub.onConnect.addListener((port) => port.onDisconnect.addListener(() => native.closed++))
@@ -21,7 +27,7 @@ const setup = (o: { onSortEnd?: () => void; settings?: Settings; configured?: Se
       relay(() => {
         native.opened++
         return { port: companion.hub.connect(), lastError: () => undefined }
-      }, pages.onConnect, Effect.succeed(o.settings)),
+      }, pages.onConnect, Effect.succeed(o.settings), o.version),
     )
     /** A page with its own scope; closing the scope is the tab going away. */
     const page = Effect.gen(function* () {
@@ -40,6 +46,21 @@ describe('relay', () => {
       const { page } = yield* setup({ settings, configured })
       yield* (yield* page).client.Health()
       assert.deepStrictEqual(configured, [settings])
+    }).pipe(Effect.scoped))
+
+  it.effect('a companion from another release fails calls as a mismatch, so the page asks to update it', () =>
+    Effect.gen(function* () {
+      const { page } = yield* setup({ version: '0.3.0', companionVersion: '0.2.0' })
+      const exit = yield* Effect.exit((yield* page).client.GetDrafts({ ref }))
+      assert.deepStrictEqual(exit, Exit.fail(new CompanionUnavailable({ reason: 'mismatch' })))
+    }).pipe(Effect.scoped))
+
+  it.effect('a companion of the same release, or run from source, is used as is', () =>
+    Effect.gen(function* () {
+      for (const companionVersion of ['0.3.0', '0.0.0']) {
+        const { page } = yield* setup({ version: '0.3.0', companionVersion })
+        assert.deepStrictEqual(yield* (yield* page).client.GetDrafts({ ref }), [])
+      }
     }).pipe(Effect.scoped))
 
   it.effect('opens one native port for two pages', () =>

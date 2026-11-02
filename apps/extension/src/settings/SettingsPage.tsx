@@ -4,6 +4,7 @@ import { type ReactNode, useEffect, useState } from 'react'
 import { Input } from '../components/ui/input.tsx'
 import { Textarea } from '../components/ui/textarea.tsx'
 import { cn } from '../lib/utils.ts'
+import { thisInstallLine } from '../Setup.tsx'
 import { Button, Spinner } from '../ui/index.tsx'
 import { companion, ext, loadSettings, saveSettings } from './store.ts'
 
@@ -102,8 +103,10 @@ export function SettingsPage() {
           onSuccess: ({ version }) => `Connected to companion ${version}.`,
           onFailure: (e) =>
             e._tag === 'CompanionUnavailable' && e.reason === 'not-installed'
-              ? 'The companion is not installed. Run `pr-review install`, then restart the browser.'
-              : 'The companion did not answer.',
+              ? `The companion is not installed. Run this in a terminal, then reload: ${thisInstallLine()}`
+              : e._tag === 'CompanionUnavailable' && e.reason === 'mismatch'
+                ? `The companion is from a different release than this extension. Run this to update it, then reload: ${thisInstallLine()}`
+                : 'The companion did not answer.',
         }),
       ),
     ).then(setConnection)

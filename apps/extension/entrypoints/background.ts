@@ -12,7 +12,7 @@ export default defineBackground(() => {
     port.onDisconnect.addListener((p) => (lastError = chrome.runtime.lastError?.message ?? (p as { error?: { message?: string } }).error?.message))
     return { port, lastError: () => lastError }
   }
-  Effect.runFork(Layer.launch(relay(native, chrome.runtime.onConnect, storedSettings)))
+  Effect.runFork(Layer.launch(relay(native, chrome.runtime.onConnect, storedSettings, chrome.runtime.getManifest().version)))
 
   const syncHosts = () => void Effect.runPromise(storedSettings).then((s) => registerHosts(s?.hosts ?? []))
   syncHosts()

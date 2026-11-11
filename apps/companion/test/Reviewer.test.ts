@@ -6,7 +6,7 @@ import { Opiner } from '../src/Opiner.ts'
 import { Reviewer } from '../src/Reviewer.ts'
 import { Sorter } from '../src/Sorter.ts'
 import { Store } from '../src/Store.ts'
-import { Tickets } from '../src/Tickets.ts'
+import { type TicketSummary, Tickets } from '../src/Tickets.ts'
 import { type AgentCall, configLayer, fakeAccount, fakeAccount2, fakeAgent, fakeGit, fakeGitHub, ref } from './fakes.ts'
 
 const decision = (id: string, high: boolean): Decision => ({
@@ -30,7 +30,14 @@ const opinionOn = (prompt: string): AgentOpinion => ({
 const idsIn = (call: AgentCall) => [...call.prompt.split('# Decisions\n').at(-1)!.matchAll(/"id":"(\w+)"/g)].map(([, id]) => id)
 
 const setup = (
-  o: { stats?: FileStat[]; decisions?: Decision[]; pool?: ReadonlyArray<AgentAccount>; opinion?: (call: AgentCall) => Effect.Effect<unknown, AgentError>; sort?: (call: AgentCall) => Effect.Effect<unknown, AgentError> } = {},
+  o: {
+    stats?: FileStat[]
+    decisions?: Decision[]
+    pool?: ReadonlyArray<AgentAccount>
+    opinion?: (call: AgentCall) => Effect.Effect<unknown, AgentError>
+    sort?: (call: AgentCall) => Effect.Effect<unknown, AgentError>
+    ticket?: Effect.Effect<TicketSummary>
+  } = {},
 ) => {
   const agent = fakeAgent(
     (call) => (call.log.kind === 'opinion' ? (o.opinion?.(call) ?? Effect.succeed(opinionOn(call.prompt))) : (o.sort?.(call) ?? Effect.succeed(sortOf(o.decisions ?? many)))),
@@ -38,7 +45,7 @@ const setup = (
     o.pool,
   )
   const files = o.stats ?? (o.decisions ?? many).map((d) => ({ path: d.files[0]!.path, additions: 100, deletions: 1 }))
-  const deps = Layer.mergeAll(agent.layer, fakeGit({ files, diff: 'THE DIFF' }).layer, fakeGitHub(), configLayer(), Layer.succeed(Tickets, Tickets.of({ summary: () => Effect.succeed({ text: null, note: 'none' }) })))
+  const deps = Layer.mergeAll(agent.layer, fakeGit({ files, diff: 'THE DIFF' }).layer, fakeGitHub(), configLayer(), Layer.succeed(Tickets, Tickets.of({ summary: () => o.ticket ?? Effect.succeed({ text: null, note: 'none' }) })))
   const layer = Reviewer.layer.pipe(Layer.provideMerge(Opiner.layer), Layer.provideMerge(Sorter.layer), Layer.provideMerge(Store.layerWith(KeyValueStore.layerMemory)), Layer.provideMerge(deps))
   return { agent, layer }
 }
@@ -60,6 +67,29 @@ describe('Reviewer', () => {
       assert.deepStrictEqual(turns(agent.calls), ['1/fake/0/main/sort'])
       assert.isTrue(r.sort.quick)
       assert.match(agent.calls[0]!.prompt, /THE DIFF/)
+    }))
+
+  it.effect('the quick path shows "Reading the ticket" while it waits', () =>
+    Effect.gen(function* () {
+      const gate = yield* Deferred.make<void>()
+      const { layer } = setup({
+        stats: [stat('src/a.ts', 30)],
+        sort: (call) => Effect.succeed(quickAnswer(call)),
+        ticket: Effect.as(Deferred.await(gate), { text: 'CORE-1: do it', note: 'read' }),
+      })
+      yield* Effect.gen(function* () {
+        const reviewer = yield* Reviewer
+        yield* reviewer.prepare(ref, 'HEAD1')
+        const step = yield* reviewer.progress(ref, 'HEAD1').pipe(
+          Stream.map((ps) => ps.find((p) => p.id === 'quick')?.workers[0]?.step),
+          Stream.filter((s) => s !== undefined),
+          Stream.runHead,
+        )
+        assert.strictEqual(Option.getOrThrow(step), 'Reading the ticket')
+        yield* Deferred.succeed(gate, undefined)
+        const r = yield* reviewer.result(ref, 'HEAD1')
+        assert.strictEqual(r.opinion?.ticket, 'CORE-1: do it')
+      }).pipe(Effect.provide(layer))
     }))
 
   it.effect("test and lockfile lines don't count", () =>
@@ -103,7 +133,7 @@ describe('Reviewer', () => {
         // Cached for the old RPCs, and kept to carry to later heads.
         return { r, sorted: yield* (yield* Sorter).cached(ref, 'HEAD1'), opined: yield* (yield* Opiner).cached(ref, 'HEAD1'), last: yield* (yield* Store).lastOpinion.get('h/o/r#7') }
       }).pipe(Effect.provide(layer))
-      assert.deepStrictEqual(turns(agent.calls), ['1/fake/0/fast/sort', '1/fake/1/main/opinion', '2/fake2/0/fast/opinion'])
+      assert.deepStrictEqual(turns(agent.calls), ['1/fake/0/main/sort', '1/fake/1/main/opinion', '2/fake2/0/fast/opinion'])
       assert.deepStrictEqual(idsIn(agent.calls[1]!), ['h1', 'h2'])
       assert.deepStrictEqual(idsIn(agent.calls[2]!), ['l1', 'l2', 'l3'])
       // The second turn has the diff from the sort; the fresh session gets its own.
@@ -116,11 +146,32 @@ describe('Reviewer', () => {
       assert.isTrue(Option.isSome(last))
     }))
 
+  it.effect('sort turn uses main', () =>
+    Effect.gen(function* () {
+      const { agent, layer } = setup({ pool: [{ ...fakeAccount, fastModel: 'quick-model' }] })
+      yield* review.pipe(Effect.provide(layer))
+      assert.deepInclude(agent.calls[0], { model: 'main', log: { ...agent.calls[0]!.log, kind: 'sort' } })
+    }))
+
+  it.effect('ticket fetch runs in parallel with the sort', () =>
+    Effect.gen(function* () {
+      const started = yield* Deferred.make<void>()
+      const sorted = yield* Deferred.make<void>()
+      const { agent, layer } = setup({
+        // Each waits on the other, so this only finishes when both run at once.
+        sort: () => Effect.as(Effect.andThen(Deferred.await(started), Deferred.succeed(sorted, undefined)), sortOf(many)),
+        ticket: Effect.as(Effect.andThen(Deferred.succeed(started, undefined), Deferred.await(sorted)), { text: 'CORE-1: do it', note: 'read' }),
+      })
+      const r = yield* review.pipe(Effect.provide(layer))
+      assert.strictEqual(r.opinion?.ticket, 'CORE-1: do it')
+      assert.match(agent.calls[1]!.prompt, /CORE-1: do it/)
+    }))
+
   it.effect('with one account all turns share the session, low after high', () =>
     Effect.gen(function* () {
       const { agent, layer } = setup()
       const r = yield* review.pipe(Effect.provide(layer))
-      assert.deepStrictEqual(turns(agent.calls), ['1/fake/0/fast/sort', '1/fake/1/main/opinion', '1/fake/2/fast/opinion'])
+      assert.deepStrictEqual(turns(agent.calls), ['1/fake/0/main/sort', '1/fake/1/main/opinion', '1/fake/2/fast/opinion'])
       assert.deepStrictEqual(idsIn(agent.calls[1]!), ['h1', 'h2'])
       assert.deepStrictEqual(idsIn(agent.calls[2]!), ['l1', 'l2', 'l3'])
       assert.deepStrictEqual(r.opinion?.decisions.map((d) => d.decisionId), ['h1', 'l1', 'h2', 'l2', 'l3'])
@@ -130,7 +181,7 @@ describe('Reviewer', () => {
     Effect.gen(function* () {
       const { agent, layer } = setup({ decisions: few, pool: [fakeAccount, fakeAccount2] })
       yield* review.pipe(Effect.provide(layer))
-      assert.deepStrictEqual(turns(agent.calls), ['1/fake/0/fast/sort', '1/fake/1/main/opinion', '1/fake/2/fast/opinion'])
+      assert.deepStrictEqual(turns(agent.calls), ['1/fake/0/main/sort', '1/fake/1/main/opinion', '1/fake/2/fast/opinion'])
     }))
 
   it.effect('a cached sort runs only the opinion', () =>

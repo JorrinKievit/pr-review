@@ -41,8 +41,8 @@ export class Agent extends Context.Service<
     idle(): Effect.Effect<ReadonlyArray<AgentAccount>>
     /** `resume` is a Done event's sessionId; it names the account the conversation ran on. */
     streaming(o: Run & { resume?: string }): Stream.Stream<AskEvent, AgentError>
-    /** One read-only turn on an account set to read tickets, in an empty temp dir; the answer text. */
-    ticket(o: { prompt: string; log: RunLog }): Effect.Effect<string, AgentError>
+    /** One read-only turn on an account set to read tickets, in an empty temp dir; the answer text. `fast` as in session turns. */
+    ticket(o: { prompt: string; log: RunLog; model?: 'fast' | 'main' }): Effect.Effect<string, AgentError>
     readonly status: Effect.Effect<ReadonlyArray<AccountStatus>>
   }
 >()('pr-review/Agent') {
@@ -263,7 +263,10 @@ export class Agent extends Context.Service<
                     o.log,
                     a,
                     Effect.flatMap(acp.open(a, cwd, undefined, { tickets: true }), (session) =>
-                      session.prompt(o.prompt).pipe(Stream.runFold(() => '', (acc, u) => (u._tag === 'Text' ? acc + u.delta : acc))),
+                      Effect.andThen(
+                        o.model === 'fast' && a.fastModel ? session.setModel(a.fastModel) : Effect.void,
+                        session.prompt(o.prompt).pipe(Stream.runFold(() => '', (acc, u) => (u._tag === 'Text' ? acc + u.delta : acc))),
+                      ),
                     ),
                   ),
                 true,

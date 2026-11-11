@@ -44,6 +44,7 @@ export class Tickets extends Context.Service<
             const answer = yield* agent
               .ticket({
                 prompt: `${ticketPrompt}\n# Tickets\n${others.map((r) => `- ${r}`).join('\n')}`,
+                model: 'fast',
                 log: { kind: 'ticket', owner: ref.owner, repo: ref.repo, number: ref.number, headSha: pr.headSha },
               })
               .pipe(Effect.result)
@@ -55,16 +56,23 @@ export class Tickets extends Context.Service<
           return { text: texts.length ? texts.join('\n\n') : null, note: notes.join('; ') || 'No ticket reference found' } satisfies TicketSummary
         })
 
+      // Keyed per PR, so a new head reuses the summary. The lookup reads the PR as last passed in.
+      const latest = new Map<string, { ref: PrRef; pr: PrMeta }>()
       // Only summaries with text are kept, so a newly flagged ticket account or a tracker that was down gets another try.
       const cache = yield* Cache.makeWith(
         (key: string) => {
-          const { ref, pr } = JSON.parse(key) as { ref: PrRef; pr: PrMeta }
+          const { ref, pr } = latest.get(key)!
           return lookup(ref, pr)
         },
         { capacity: 256, timeToLive: (exit) => (Exit.isSuccess(exit) && exit.value.text !== null ? '30 minutes' : 0) },
       )
       return Tickets.of({
-        summary: (ref, pr) => Cache.get(cache, JSON.stringify({ ref, pr })),
+        summary: (ref, pr) =>
+          Effect.suspend(() => {
+            const key = `${ref.host}/${ref.owner}/${ref.repo}#${ref.number}`
+            latest.set(key, { ref, pr })
+            return Cache.get(cache, key)
+          }),
       })
     }),
   )

@@ -40,6 +40,7 @@ export const fakeAgent = (
   const calls: AgentCall[] = []
   let sessions = 0
   const ticketPrompts: string[] = []
+  const ticketModels: Array<'fast' | 'main' | undefined> = []
   const answer = (call: AgentCall, onStep: ((s: string) => Effect.Effect<void>) | undefined, schema: Schema.Top) =>
     Effect.suspend(() => {
       calls.push(call)
@@ -71,11 +72,11 @@ export const fakeAgent = (
           calls.push(o)
           return Stream.make({ _tag: 'Text' as const, delta: 'Hi' }, { _tag: 'Done' as const, sessionId: 'sess-1' })
         }),
-      ticket: (o) => Effect.suspend(() => (ticketPrompts.push(o.prompt), ticket(o.prompt))),
+      ticket: (o) => Effect.suspend(() => (ticketPrompts.push(o.prompt), ticketModels.push(o.model), ticket(o.prompt))),
       status: Effect.succeed([]),
     }),
   )
-  return { calls, ticketPrompts, layer }
+  return { calls, ticketPrompts, ticketModels, layer }
 }
 
 export const overviewReply: StackOverview = { summary: 's', tables: [], modules: [], endpoints: [], sharedLayers: [] }

@@ -54,6 +54,19 @@ describe('Tickets', () => {
       assert.notInclude(prompt, pr.title)
     }))
 
+  it.effect('ticket summary is reused for a new head', () =>
+    Effect.gen(function* () {
+      const agent = fakeAgent(undefined, () => Effect.succeed('CORE-650: plan things'))
+      yield* Effect.gen(function* () {
+        const t = yield* Tickets
+        const first = yield* t.summary(ref, { ...pr, body: 'For CORE-650', headSha: 'HEAD1' })
+        const second = yield* t.summary(ref, { ...pr, body: 'For CORE-650', headSha: 'HEAD2' })
+        assert.deepStrictEqual(second, first)
+      }).pipe(Effect.provide(Tickets.layer.pipe(Layer.provide([agent.layer, fakeGitHub()]))))
+      assert.strictEqual(agent.ticketPrompts.length, 1)
+      assert.deepStrictEqual(agent.ticketModels, ['fast'])
+    }))
+
   it.effect('no ticket account gives a note, not a failure', () =>
     Effect.gen(function* () {
       const { summary } = setup({ body: 'For CORE-650' })

@@ -8,6 +8,7 @@ import { GitHub } from './GitHub.ts'
 import { type OpinionContext, Opiner } from './Opiner.ts'
 import { type SortError, Sorter } from './Sorter.ts'
 import { Store } from './Store.ts'
+import { type TicketSummary, Tickets } from './Tickets.ts'
 import { buildTrusted } from './trusted.ts'
 
 const quickInstructions = readFileSync(new URL('../prompts/quick.md', import.meta.url), 'utf8')
@@ -69,12 +70,13 @@ export class Reviewer extends Context.Service<
       const sorter = yield* Sorter
       const opiner = yield* Opiner
       const store = yield* Store
+      const tickets = yield* Tickets
       const scope = yield* Effect.scope
       const keyOf = (ref: PrRef, headSha: string) => `${ref.host}/${ref.owner}/${ref.repo}#${ref.number}@${headSha}`
       const runs = new Map<string, { phases: Phases; done: Deferred.Deferred<Review, SortError> }>()
 
       /** Small PRs get one turn on the whole change instead of piles. Undefined means sort as usual. */
-      const quick = Effect.fnUntraced(function* (ref: PrRef, headSha: string, t: Tracker) {
+      const quick = Effect.fnUntraced(function* (ref: PrRef, headSha: string, t: Tracker, ticket: Fiber.Fiber<TicketSummary>) {
         const repoKey = `${ref.host}/${ref.owner}/${ref.repo}`
         const settings = yield* config.settings
         const gh = yield* github.forHost(ref.host)
@@ -88,6 +90,8 @@ export class Reviewer extends Context.Service<
         const contextFiber = yield* Effect.forkChild(opiner.context(ref, headSha))
         yield* t.end('fetch', 'done')
         yield* t.begin('quick', `Reading the change: ${lines} lines in ${plural(rest.length, 'file')}`)
+        if (!ticket.pollUnsafe()) yield* t.worker('quick', 0, (w) => ({ ...w, step: 'Reading the ticket' }))
+        yield* Fiber.join(ticket)
         const c = yield* Fiber.join(contextFiber).pipe(Effect.onError(() => t.end('quick', 'failed')))
         const changes: Decision = {
           id: 'changes',
@@ -153,11 +157,14 @@ export class Reviewer extends Context.Service<
         const gh = yield* github.forHost(ref.host)
         const pr = yield* gh.getPr(ref.owner, ref.repo, ref.number)
         yield* t.begin('fetch', `Fetching #${ref.number}: ${pr.title}`)
+        // Started now so the turn that needs it waits least; `opiner.context` joins the same lookup.
+        const ticket = yield* Effect.forkChild(tickets.summary(ref, pr))
         if (!cachedSort) {
-          const q = yield* quick(ref, headSha, t)
+          const q = yield* quick(ref, headSha, t, ticket)
           if (q) return q
         }
         const wantOpinion = automatic && !cachedOpinion
+        if (!wantOpinion) yield* Fiber.interrupt(ticket)
         // Fetched while the sort runs.
         const contextFiber = wantOpinion ? yield* Effect.forkChild(opiner.context(ref, headSha)) : undefined
         const sortPrompt = cachedSort ? undefined : yield* sorter.prepare(ref, headSha)
@@ -200,7 +207,7 @@ export class Reviewer extends Context.Service<
               main.phase = 'sort'
               yield* t.begin('sort', `Sorting ${plural(sortPrompt!.files.length, 'file')}`)
               yield* named(main, account)
-              sort = sortPrompt!.finish(yield* turns.structured(sortPrompt!.prompt, AgentSort, 'fast', 'sort'))
+              sort = sortPrompt!.finish(yield* turns.structured(sortPrompt!.prompt, AgentSort, 'main', 'sort'))
               yield* sorter.remember(ref, headSha, sort)
               yield* t.end('sort', 'done')
               continued = true

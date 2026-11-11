@@ -242,6 +242,17 @@ describe('Agent.ticket', () => {
       assert.isFalse(existsSync(opened[0]!.cwd))
     }))
 
+  it.live('the fast model when asked and the account has one', () =>
+    Effect.gen(function* () {
+      const { layer, models } = setup(() => Effect.succeed('x'), [{ ...account('b'), tickets: true, fastModel: 'sonnet' }])
+      yield* Effect.gen(function* () {
+        const agent = yield* Agent
+        yield* agent.ticket({ prompt: 'Fetch ABC-1', log: { ...log, kind: 'ticket' }, model: 'fast' })
+        yield* agent.ticket({ prompt: 'Fetch ABC-1', log: { ...log, kind: 'ticket' } })
+      }).pipe(Effect.provide(layer))
+      assert.deepStrictEqual(models, ['sonnet'])
+    }))
+
   it.live('without such an account it says so', () =>
     Effect.gen(function* () {
       const { layer } = setup(() => Effect.succeed('x'), [account('a'), { ...account('b'), tickets: true, enabled: false }])

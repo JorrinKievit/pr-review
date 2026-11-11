@@ -7,7 +7,13 @@ import { Config } from './Config.ts'
 export type RunLog = { kind: 'sort' | 'ask' | 'chat' | 'overview' | 'opinion' | 'deeper' | 'stack-opinion' | 'ticket' | 'rule'; owner: string; repo: string; number: number; headSha: string }
 type Opts = { cwd: string; related?: ReadonlyArray<string>; /** Only `deep` accounts when the pool has any, else the whole pool. */ prefer?: 'deep'; log: RunLog; onStep?: (step: string) => Effect.Effect<void> }
 type Run = Opts & { prompt: string }
-export type SessionOptions = Opts & { avoid?: ReadonlySet<string>; /** Each whole line of the agent's answer text as it streams. */ onText?: (line: string) => Effect.Effect<void> }
+export type SessionOptions = Opts & {
+  avoid?: ReadonlySet<string>
+  /** Each whole line of the agent's answer text as it streams. */
+  onText?: (line: string) => Effect.Effect<void>
+  /** Fail at once when no account has a free slot, instead of waiting for one. */
+  noWait?: boolean
+}
 type Decodable = Schema.Top & { readonly DecodingServices: never }
 /** Turns in one agent session. `fast` runs on the account's fastModel when it has one; `main` (the default) on its main model. */
 export type AgentTurns = { structured<S extends Decodable>(prompt: string, schema: S, model?: 'fast' | 'main', turnKind?: RunLog['kind']): Effect.Effect<S['Type'], AgentError> }
@@ -63,7 +69,7 @@ export class Agent extends Context.Service<
        * The least busy account with room, held until the scope closes. Waits while all are busy.
        * Ticket reads skip that wait: a session can hold the last slot while it waits on its own ticket.
        */
-      const acquire = (o: Opts, avoid: ReadonlySet<string>, only?: string, tickets = false) =>
+      const acquire = (o: Opts & { noWait?: boolean }, avoid: ReadonlySet<string>, only?: string, tickets = false) =>
         Effect.acquireRelease(
           Effect.gen(function* () {
             let waiting = false
@@ -92,7 +98,8 @@ export class Agent extends Context.Service<
                 stateOf(free.id).busy++
                 return free
               }
-              if (!waiting) yield* step(o, 'Waiting for a free AI account')
+              if (o.noWait) return yield* new AgentError({ message: 'No AI account has a free slot' })
+              if (!waiting) yield* step(o, `Waiting for a free account (${ready.map((a) => a.name).join(', ')} busy)`)
               waiting = true
               yield* Effect.sleep('500 millis')
             }
@@ -134,7 +141,7 @@ export class Agent extends Context.Service<
         Effect.flatMap(Clock.currentTimeMillis, (startedAt) => timeLimit(a, effect).pipe(Effect.ensuring(logUsage(log, a, startedAt))))
 
       /** Runs on one account after another until one answers or none is left; an account that hits its limit sits out. */
-      const withAccount = <A>(o: Opts, use: (a: AgentAccount) => Effect.Effect<A, AgentError, Scope.Scope>, tickets = false, avoid: ReadonlySet<string> = new Set()) => {
+      const withAccount = <A>(o: Opts & { noWait?: boolean }, use: (a: AgentAccount) => Effect.Effect<A, AgentError, Scope.Scope>, tickets = false, avoid: ReadonlySet<string> = new Set()) => {
         const attempt = (avoid: ReadonlySet<string>): Effect.Effect<A, AgentError> =>
           Effect.gen(function* () {
             let account: AgentAccount | undefined

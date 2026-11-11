@@ -1,4 +1,4 @@
-import { type AgentAccount, type AgentError, AgentOpinion, AgentQuick, AgentSort, type Decision, impact, opinionsMode, type Phase, type PrOpinion, type PrRef, repoSettings, smallPrLines, type SortResult } from '@pr-review/domain'
+import { type AgentAccount, AgentOpinion, AgentQuick, AgentSort, type Decision, impact, opinionsMode, type Phase, type PrOpinion, type PrRef, repoSettings, smallPrLines, type SortResult } from '@pr-review/domain'
 import { readFileSync } from 'node:fs'
 import { Clock, Context, Deferred, Effect, Exit, Fiber, Layer, Stream, SubscriptionRef } from 'effect'
 import { Agent, type AgentTurns, type SessionOptions } from './Agent.ts'
@@ -215,6 +215,15 @@ export class Reviewer extends Context.Service<
           Effect.flatMap(c.prompt(group, { continued }), (prompt) => turns.structured(prompt, AgentOpinion, model, 'opinion'))
 
         const main: Slot = { phase: 'sort', worker: 0, judging: [] }
+        const judging = (s: SortResult) =>
+          Effect.andThen(
+            Effect.sync(() => void (main.phase = 'opinion')),
+            t.begin('opinion', `Judging ${plural(judged(s).length, 'decision')}`),
+          )
+        // Begun before the session takes an account, so a wait for one shows on it.
+        if (!sort) yield* t.begin('sort', `Sorting ${plural(sortPrompt!.files.length, 'file')}`)
+        else if (!judged(sort).length) opinionError = 'Nothing to judge'
+        else yield* judging(sort)
         const session = agent.session(options(main), (turns, account) =>
           Effect.gen(function* () {
             let continued = false
@@ -228,39 +237,42 @@ export class Reviewer extends Context.Service<
               continued = true
             }
             if (!contextFiber) return
+            const decisions = judged(sort)
+            if (!decisions.length) return void (opinionError = 'Nothing to judge')
+            yield* judging(sort)
+            yield* named(main, account)
+            if (!contextFiber.pollUnsafe())
+              yield* t.worker('opinion', 0, (w) => step(w, ticket.pollUnsafe() ? 'Reading the stack and review guidance' : 'Reading the ticket'))
             const got = yield* Effect.result(Fiber.join(contextFiber))
             if (got._tag === 'Failure') return void (opinionError = got.failure.message)
             const c = (context = got.success)
-            const decisions = judged(sort)
-            if (!decisions.length) return void (opinionError = 'Nothing to judge')
             // A quick sort's one decision gets the main model, as on the quick path.
             const hi = sort.quick ? decisions : decisions.filter((d) => impact(d) === 'high')
             const lo = sort.quick ? [] : decisions.filter((d) => impact(d) === 'low')
-            yield* t.begin('opinion', `Judging ${plural(decisions.length, 'decision')}`)
             const other = decisions.length > 4 && hi.length && lo.length ? (yield* agent.idle()).find((a) => a.id !== account.id) : undefined
-            Object.assign(main, { phase: 'opinion', judging: other ? hi : [...hi, ...lo] })
-            yield* named(main, account)
+            main.judging = other ? hi : [...hi, ...lo]
 
             const side: Slot = { phase: 'opinion', worker: 1, judging: lo }
-            const elsewhere: Effect.Effect<AgentOpinion | undefined, AgentError> =
+            // Never waits for a slot; without one the low group runs here after the high one.
+            const elsewhere =
               other && !low
-                ? agent.session({ ...options(side), avoid: new Set([account.id]) }, (turns2, account2) =>
-                    Effect.andThen(named(side, account2), ask(turns2, c, lo, 'fast', false)),
+                ? agent.session({ ...options(side), avoid: new Set([account.id]), noWait: true }, (turns2, account2) =>
+                    Effect.andThen(named(side, account2), ask(turns2, c, lo, 'fast', false)).pipe(Effect.tap((a) => Effect.sync(() => void (low = a)))),
                   )
-                : Effect.undefined
-            const [, away] = yield* Effect.all(
-              [high || !hi.length ? Effect.void : Effect.map(ask(turns, c, hi, 'main', continued), (a) => void (high = a)), Effect.result(elsewhere)],
-              { concurrency: 2 },
-            )
-            if (away._tag === 'Success' && away.success) low = away.success
+                : Effect.void
+            // `low` is set as soon as the side session answers, so a failed high turn doesn't throw it away.
+            yield* Effect.all([high || !hi.length ? Effect.void : Effect.map(ask(turns, c, hi, 'main', continued), (a) => void (high = a)), Effect.ignore(elsewhere)], {
+              concurrency: 2,
+            })
             if (!low && lo.length) {
               main.judging = [...hi, ...lo]
               low = yield* ask(turns, c, lo, 'fast', continued)
             }
           }),
         )
-        const outcome = yield* Effect.result(session)
-        if (outcome._tag === 'Failure') {
+        // Nothing for a session to do: the sort is known and there is no opinion to make.
+        const outcome = sort && (!contextFiber || opinionError) ? undefined : yield* Effect.result(session)
+        if (outcome?._tag === 'Failure') {
           if (!sort) return yield* outcome.failure
           opinionError ??= outcome.failure.message
         }

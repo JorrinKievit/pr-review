@@ -31,6 +31,7 @@ export const fakeAccount2: AgentAccount = { ...fakeAccount, id: 'fake2', name: '
 /**
  * An Agent whose structured runs and session turns answer with `reply()`, streaming runs emit `Hi` then Done, and ticket runs answer with `ticket()` (default: no ticket account).
  * A session takes the first `pool` account it doesn't avoid; `idle()` lists the whole pool.
+ * A session failing with "usage limit" benches its account: `use` reruns in a new session on the next pool account, while there is one.
  */
 export const fakeAgent = (
   reply: (call: AgentCall) => Effect.Effect<unknown, any> = () => Effect.succeed({ decisions: [], skim: [], claims: [] } satisfies AgentSort),
@@ -53,19 +54,23 @@ export const fakeAgent = (
     Agent,
     Agent.of({
       structured: (o) => answer(o, o.onStep, o.schema) as never,
-      session: (o, use) =>
-        Effect.suspend(() => {
-          const session = ++sessions
-          const account = pool.find((a) => !o.avoid?.has(a.id)) ?? fakeAccount
-          let turn = 0
-          return use(
-            {
-              structured: (prompt, schema, model = 'main', turnKind) =>
-                answer({ ...o, prompt, session, account: account.id, turn: turn++, model, log: turnKind ? { ...o.log, kind: turnKind } : o.log }, o.onStep, schema) as never,
-            },
-            account,
-          )
-        }),
+      session: (o, use) => {
+        const attempt = (tried: ReadonlySet<string>): ReturnType<typeof use> =>
+          Effect.suspend(() => {
+            const session = ++sessions
+            const free = (a: AgentAccount) => !o.avoid?.has(a.id) && !tried.has(a.id)
+            const account = pool.find(free) ?? fakeAccount
+            let turn = 0
+            return use(
+              {
+                structured: (prompt, schema, model = 'main', turnKind) =>
+                  answer({ ...o, prompt, session, account: account.id, turn: turn++, model, log: turnKind ? { ...o.log, kind: turnKind } : o.log }, o.onStep, schema) as never,
+              },
+              account,
+            ).pipe(Effect.catchIf((e) => /usage limit/.test(e.message) && pool.some((a) => a.id !== account.id && free(a)), () => attempt(new Set([...tried, account.id]))))
+          })
+        return attempt(new Set())
+      },
       idle: () => Effect.succeed(pool),
       streaming: (o) =>
         Stream.suspend(() => {
@@ -76,7 +81,7 @@ export const fakeAgent = (
       status: Effect.succeed([]),
     }),
   )
-  return { calls, ticketPrompts, ticketModels, layer }
+  return { calls, ticketPrompts, ticketModels, layer, sessions: () => sessions }
 }
 
 export const overviewReply: StackOverview = { summary: 's', tables: [], modules: [], endpoints: [], sharedLayers: [] }

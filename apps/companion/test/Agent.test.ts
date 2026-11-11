@@ -82,10 +82,25 @@ describe('Agent.structured', () => {
         const runs = yield* Effect.forEach([[], [], steps], (s) => Effect.forkChild(structured(s)))
         yield* Effect.sleep('100 millis')
         assert.deepStrictEqual(opened.map((o) => o.account).sort(), ['a', 'b'])
-        assert.include(steps, 'Waiting for a free AI account')
+        assert.include(steps, 'Waiting for a free account (Agent a, Agent b busy)')
         yield* Deferred.succeed(gate, undefined)
         yield* Fiber.joinAll(runs)
         assert.strictEqual(opened.length, 3)
+      }).pipe(Effect.provide(layer))
+    }))
+
+  it.live('noWait fails at once when every slot is taken', () =>
+    Effect.gen(function* () {
+      const gate = yield* Deferred.make<void>()
+      const { layer } = setup(() => Effect.as(Deferred.await(gate), '{"ok": true}'), [account('a')])
+      yield* Effect.gen(function* () {
+        const agent = yield* Agent
+        const held = yield* Effect.forkChild(structured())
+        yield* Effect.sleep('50 millis')
+        const e = yield* Effect.flip(agent.session({ cwd: '/repo', log, noWait: true }, (turns) => turns.structured('x', Ok)))
+        assert.strictEqual(e.message, 'No AI account has a free slot')
+        yield* Deferred.succeed(gate, undefined)
+        yield* Fiber.join(held)
       }).pipe(Effect.provide(layer))
     }))
 

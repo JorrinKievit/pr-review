@@ -351,6 +351,80 @@ describe('Reviewer', () => {
       assert.deepStrictEqual(r.opinion?.decisions.map((d) => d.decisionId), ids)
     }))
 
+  it.effect('a benched account reruns the opinion on another, keeping the sort', () =>
+    Effect.gen(function* () {
+      const { agent, layer } = setup({
+        decisions: few,
+        pool: [fakeAccount, fakeAccount2],
+        opinion: (call) => (call.account === 'fake' ? Effect.fail(new AgentError({ message: "You've hit your usage limit" })) : Effect.succeed(opinionOn(call.prompt))),
+      })
+      const r = yield* review.pipe(Effect.provide(layer))
+      assert.deepStrictEqual(turns(agent.calls), ['1/fake/0/main/sort', '1/fake/1/main/opinion', '2/fake2/0/main/opinion', '2/fake2/1/fast/opinion'])
+      // The fresh session has no sort turn before it, so it gets the diff.
+      assert.match(agent.calls[2]!.prompt, /THE DIFF/)
+      assert.isUndefined(r.opinionError)
+      assert.deepStrictEqual(r.opinion?.decisions.map((d) => d.decisionId), ['h1', 'l1'])
+    }))
+
+  it.effect('a failed second account leaves the low group to the sort session', () =>
+    Effect.gen(function* () {
+      const { agent, layer } = setup({
+        pool: [fakeAccount, fakeAccount2],
+        opinion: (call) => (call.account === 'fake2' ? Effect.fail(new AgentError({ message: 'Claude fell over' })) : Effect.succeed(opinionOn(call.prompt))),
+      })
+      const r = yield* review.pipe(Effect.provide(layer))
+      assert.deepStrictEqual(turns(agent.calls), ['1/fake/0/main/sort', '1/fake/1/main/opinion', '2/fake2/0/fast/opinion', '1/fake/2/fast/opinion'])
+      assert.isUndefined(r.opinionError)
+      assert.deepStrictEqual(r.opinion?.decisions.map((d) => d.decisionId), ['h1', 'l1', 'h2', 'l2', 'l3'])
+    }))
+
+  it.live('a benched high turn keeps the low group the second account already answered', () =>
+    Effect.gen(function* () {
+      const fakeAccount3 = { ...fakeAccount, id: 'fake3', name: 'Fake 3' }
+      const { agent, layer } = setup({
+        pool: [fakeAccount, fakeAccount2, fakeAccount3],
+        opinion: (call) =>
+          call.account === 'fake' && call.model === 'main'
+            ? Effect.andThen(Effect.sleep('50 millis'), Effect.fail(new AgentError({ message: "You've hit your usage limit" })))
+            : Effect.succeed(opinionOn(call.prompt)),
+      })
+      const r = yield* review.pipe(Effect.provide(layer))
+      assert.deepStrictEqual(turns(agent.calls), ['1/fake/0/main/sort', '1/fake/1/main/opinion', '2/fake2/0/fast/opinion', '3/fake2/0/main/opinion'])
+      assert.isUndefined(r.opinionError)
+      assert.deepStrictEqual(r.opinion?.decisions.map((d) => d.decisionId), ['h1', 'l1', 'h2', 'l2', 'l3'])
+    }))
+
+  it.effect('the opinion phase shows "Reading the ticket" while the ticket holds it up', () =>
+    Effect.gen(function* () {
+      const gate = yield* Deferred.make<void>()
+      const { layer } = setup({ decisions: few, ticket: Effect.as(Deferred.await(gate), { text: 'CORE-1: do it', note: 'read' }) })
+      yield* Effect.gen(function* () {
+        yield* (yield* Sorter).sort(ref, 'HEAD1')
+        const reviewer = yield* Reviewer
+        yield* reviewer.prepare(ref, 'HEAD1')
+        const phase = yield* reviewer.progress(ref, 'HEAD1').pipe(
+          Stream.map((ps) => ps.find((p) => p.id === 'opinion')),
+          Stream.filter((p): p is Phase => p?.workers[0]?.step !== undefined),
+          Stream.runHead,
+        )
+        assert.deepInclude(Option.getOrThrow(phase), { label: 'Judging 2 decisions' })
+        assert.deepInclude(Option.getOrThrow(phase).workers[0], { account: 'Fake', step: 'Reading the ticket' })
+        yield* Deferred.succeed(gate, undefined)
+        yield* reviewer.result(ref, 'HEAD1')
+      }).pipe(Effect.provide(layer))
+    }))
+
+  it.effect('a cached sort with nothing to judge takes no account', () =>
+    Effect.gen(function* () {
+      const { agent, layer } = setup({ decisions: [], stats: [stat('src/a.ts', 300)] })
+      const r = yield* Effect.gen(function* () {
+        yield* (yield* Sorter).sort(ref, 'HEAD1')
+        return yield* review
+      }).pipe(Effect.provide(layer))
+      assert.strictEqual(agent.sessions(), 0)
+      assert.strictEqual(r.opinionError, 'Nothing to judge')
+    }))
+
   it.effect('opinion failure still returns the sort with opinionError', () =>
     Effect.gen(function* () {
       const { layer } = setup({ opinion: () => Effect.fail(new AgentError({ message: 'Claude fell over' })) })

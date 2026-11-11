@@ -60,6 +60,17 @@ export const makeAtoms = (client: Client) => {
     )
   })
   const cachedOpinion = (ref: string, headSha: string): Atom.Atom<unknown> => opinion(`${ref}@${headSha}@cached`)
+  const stackOpinion = Atom.family((key: string) => {
+    const [ref, run] = key.split('@') as [string, string]
+    return Atom.keepAlive(
+      client.runtime.atom((get) =>
+        Stream.unwrap(Effect.map(rpc, (c) => c('StackOpinion', { ref: parse(ref), run: run === 'run' }))).pipe(
+          Stream.tap((e) => (e._tag === 'Done' && run === 'run' ? Effect.sync(() => get.refresh(cachedStackOpinion(ref))) : Effect.void)),
+        ),
+      ),
+    )
+  })
+  const cachedStackOpinion = (ref: string): Atom.Atom<unknown> => stackOpinion(`${ref}@cached`)
   const deeper = Atom.family((key: string) => {
     const { ref, headSha, decisionId } = JSON.parse(key) as { ref: PrRef; headSha: string; decisionId: string }
     return Atom.keepAlive(
@@ -83,6 +94,8 @@ export const makeAtoms = (client: Client) => {
     ),
     /** Claude's opinion on the PR. With `run` false it only reads a cached one (`Idle` without); a finished run refreshes that one, which the page shows. */
     opinionAtom: (ref: PrRef, headSha: string, run: boolean) => opinion(`${refKey(ref)}@${headSha}@${run ? 'run' : 'cached'}`),
+    /** One opinion on the stack as a whole. With `run` false it only reads a cached one (`Idle` without); a finished run refreshes that one. */
+    stackOpinionAtom: (ref: PrRef, run: boolean) => stackOpinion(`${refKey(ref)}@${run ? 'run' : 'cached'}`),
     /** One decision looked at again on the strongest model; when done the cached opinion carries it. */
     deeperAtom: (ref: PrRef, headSha: string, decisionId: string) => deeper(JSON.stringify({ ref, headSha, decisionId })),
     findingStateAtom: client.runtime.fn((a: { ref: PrRef; headSha: string; findingId: string; state: FindingState | null }, get) =>

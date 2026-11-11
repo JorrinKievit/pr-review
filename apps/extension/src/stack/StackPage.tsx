@@ -256,7 +256,7 @@ function Loaded({ prRef, entries, overview, overviewError }: { prRef: PrRef; ent
               {failed.length === 1 ? `#${failed[0]!.pr.number} could not be sorted` : `${failed.length} PRs could not be sorted`}: {failed[0]!.error}
             </p>
           )}
-          {sel.kind === 'overview' && <Overview entries={entries} overview={overview} overviewError={overviewError} progress={progress} onOpen={goPr} />}
+          {sel.kind === 'overview' && <Overview prRef={prRef} entries={entries} overview={overview} overviewError={overviewError} progress={progress} onOpen={goPr} onOpenDecision={(pr, id) => (ordered.some((r) => r.key === `${pr}:d:${id}`) ? go({ kind: 'decision', key: `${pr}:d:${id}` }) : goPr(pr))} />}
           {active && sel.kind !== 'overview' && (
             <PrBar prRef={prRef} entry={active} position={prIndex + 1} count={entries.length} dependents={row && decision ? dependentsOf(decision, row.pr.number, files) : []} onStep={stepPr} reviewOpen={reviewOpen} onReviewOpenChange={setReviewOpen} onSent={() => stepPr(1)} />
           )}

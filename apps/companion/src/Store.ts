@@ -1,4 +1,4 @@
-import { AgentError, AskTarget, ChatTurn, DecisionState, DecisionStates, Draft, FileStat, GitError, GitHubError, RepoNotConfigured, Rereview, SortResult, StackOverview } from '@pr-review/domain'
+import { AgentError, AskTarget, ChatTurn, DecisionState, DecisionStates, Draft, FileStat, FindingStates, GitError, GitHubError, PrOpinion, RepoNotConfigured, Rereview, SortResult, StackOverview } from '@pr-review/domain'
 import { Context, Effect, Exit, Layer, Schema } from 'effect'
 import { KeyValueStore, Persistable, Persistence } from 'effect/persistence'
 import { NodeServices } from '@effect/platform-node'
@@ -29,6 +29,12 @@ export class SortKey extends Persistable.Class<{ payload: { host: string; owner:
   error: errors,
 }) {}
 
+export class OpinionKey extends Persistable.Class<{ payload: { host: string; owner: string; repo: string; number: number; headSha: string } }>()('OpinionKey', {
+  primaryKey: (k) => digest(`${k.host}/${k.owner}/${k.repo}#${k.number}@${k.headSha}`),
+  success: PrOpinion,
+  error: errors,
+}) {}
+
 export type OverviewEntry = { readonly number: number; readonly headSha: string; readonly sort: SortResult; readonly files: ReadonlyArray<FileStat> }
 
 export class OverviewKey extends Persistable.Class<{
@@ -52,6 +58,17 @@ export const cacheOptions = {
   inMemoryCapacity: 200,
 } as const
 
+/** Reads what a `PersistedCache` with this store id holds, without running anything; a stored failure counts as nothing. */
+export const peek = Effect.fnUntraced(function* (storeId: string) {
+  const store = yield* (yield* Persistence.Persistence).make({ storeId, timeToLive: cacheOptions.timeToLive })
+  return <A extends Schema.Constraint, E extends Schema.Constraint>(key: Persistable.Persistable<A, E>) =>
+    store.get(key).pipe(
+      Effect.catchTag('SchemaError', () => Effect.undefined),
+      Effect.orDie,
+      Effect.map((exit): A['Type'] | undefined => (exit && Exit.isSuccess(exit) ? exit.value : undefined)),
+    )
+})
+
 /** A broken store must not hide the result: storage failures become defects. */
 type StoreFailure = Persistence.PersistenceError | Schema.SchemaError
 const isStoreFailure = (e: unknown): e is StoreFailure => e instanceof Persistence.PersistenceError || Schema.isSchemaError(e)
@@ -70,6 +87,8 @@ export class Store extends Context.Service<
     readonly lastVerdicts: KeyValueStore.SchemaStore<typeof LastVerdicts>
     /** Per head: what changed since an earlier verdict, set when the verdicts are carried. */
     readonly rereview: KeyValueStore.SchemaStore<typeof Rereview>
+    /** Per head: what the reviewer did with each finding. */
+    readonly findings: KeyValueStore.SchemaStore<typeof FindingStates>
     /** Page state between visits, opaque to the companion. */
     readonly remembered: KeyValueStore.SchemaStore<typeof Schema.String>
   }
@@ -88,6 +107,7 @@ export class Store extends Context.Service<
             lastVerdicts: KeyValueStore.toSchemaStore(KeyValueStore.prefix(store, 'last-verdicts/'), LastVerdicts),
             rereview: KeyValueStore.toSchemaStore(KeyValueStore.prefix(store, 'rereview/'), Rereview),
             remembered: KeyValueStore.toSchemaStore(KeyValueStore.prefix(store, 'remembered/'), Schema.String),
+            findings: KeyValueStore.toSchemaStore(KeyValueStore.prefix(store, 'findings/'), FindingStates),
           })
         }),
       ),

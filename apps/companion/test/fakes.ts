@@ -1,4 +1,4 @@
-import { type AgentSort, defaultSettings, type FileStat, type PrMeta, type StackOverview } from '@pr-review/domain'
+import { type AgentSort, defaultSettings, type FileStat, GitError, type PrMeta, type StackOverview } from '@pr-review/domain'
 import { Effect, Layer, Schema, Stream } from 'effect'
 import { Agent } from '../src/Agent.ts'
 import { Config } from '../src/Config.ts'
@@ -39,7 +39,7 @@ export const fakeAgent = (reply: (call: AgentCall) => Effect.Effect<unknown, any
 
 export const overviewReply: StackOverview = { summary: 's', tables: [], modules: [], endpoints: [], sharedLayers: [] }
 
-export const fakeGit = (o: { files?: FileStat[]; diff?: string | ((from: string, to: string, paths: ReadonlyArray<string>) => string); show?: string; rules?: string[] } = {}) => {
+export const fakeGit = (o: { files?: FileStat[]; diff?: string | ((from: string, to: string, paths: ReadonlyArray<string>) => string); /** One text for every file, or texts keyed `ref:path` (others fail). */ show?: string | Record<string, string>; rules?: string[] } = {}) => {
   const diffPaths: Array<ReadonlyArray<string>> = []
   const shown: string[] = []
   const listed: Array<ReadonlyArray<string>> = []
@@ -51,7 +51,13 @@ export const fakeGit = (o: { files?: FileStat[]; diff?: string | ((from: string,
       fetchPr: () => Effect.succeed({ headSha: 'HEAD1', baseSha: 'BASE1', mergeBase: 'MB1' }),
       numstat: () => Effect.succeed(o.files ?? []),
       diff: (_k, from, to, paths = []) => Effect.sync(() => (diffPaths.push(paths), typeof o.diff === 'function' ? o.diff(from, to, paths) : (o.diff ?? ''))),
-      show: (_k, ref) => Effect.sync(() => (shown.push(ref), o.show ?? '')),
+      show: (_k, ref, path) =>
+        Effect.suspend(() => {
+          shown.push(ref)
+          if (typeof o.show !== 'object') return Effect.succeed(o.show ?? '')
+          const text = o.show[`${ref}:${path}`]
+          return text === undefined ? Effect.fail(new GitError({ message: `no ${ref}:${path}` })) : Effect.succeed(text)
+        }),
       lsTree: (_k, _ref, paths) => Effect.sync(() => (listed.push(paths), o.rules ?? [])),
       defaultBranch: () => Effect.succeed('master'),
     }),

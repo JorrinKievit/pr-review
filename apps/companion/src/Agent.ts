@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path'
 import { Acp } from './Acp.ts'
 import { Config } from './Config.ts'
 
-export type RunLog = { kind: 'sort' | 'ask' | 'chat' | 'overview'; owner: string; repo: string; number: number; headSha: string }
+export type RunLog = { kind: 'sort' | 'ask' | 'chat' | 'overview' | 'opinion' | 'deeper' | 'stack-opinion' | 'ticket' | 'rule'; owner: string; repo: string; number: number; headSha: string }
 type Run = { prompt: string; cwd: string; log: RunLog; onStep?: (step: string) => Effect.Effect<void> }
 
 

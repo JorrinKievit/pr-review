@@ -1,3 +1,5 @@
+import { Effect, PubSub, Stream } from 'effect'
+
 const basename = (path: string) => path.split('/').filter(Boolean).at(-1) ?? path
 const unquote = (s: string) => s.replace(/^(['"])(.*)\1$/, '$2')
 // Arguments with quoted strings kept whole; options dropped.
@@ -33,3 +35,24 @@ export function describeTool(name: string, input: Record<string, unknown>): stri
       return `Running git ${sub ?? ''}`.trim()
   }
 }
+
+/** Steps of runs by key: `report(key)` publishes a run's steps; `follow(key)` streams its current step, then each new one, and never ends. */
+export const makeSteps = Effect.gen(function* () {
+  const published = yield* PubSub.unbounded<{ key: string; step: string }>()
+  const latest = new Map<string, string>()
+  return {
+    report: (key: string) => (step: string) => Effect.andThen(Effect.sync(() => void latest.set(key, step)), PubSub.publish(published, { key, step })),
+    follow: (key: string) =>
+      Stream.unwrap(
+        Effect.gen(function* () {
+          // Subscribe before reading the current step, so no step falls between the two.
+          const sub = yield* PubSub.subscribe(published)
+          const current = latest.get(key)
+          return Stream.concat(
+            Stream.fromIterable(current ? [current] : []),
+            Stream.fromSubscription(sub).pipe(Stream.filter((e) => e.key === key), Stream.map((e) => e.step)),
+          )
+        }),
+      ),
+  }
+})

@@ -1,5 +1,5 @@
 import { AgentSort, type AgentError, type GitError, type GitHubError, type PrRef, type RepoNotConfigured, type SortResult } from '@pr-review/domain'
-import { Context, Effect, Layer, PubSub, Stream } from 'effect'
+import { Context, Effect, Layer, type Stream } from 'effect'
 import { PersistedCache } from 'effect/persistence'
 import { readFileSync } from 'node:fs'
 import { Agent } from './Agent.ts'
@@ -7,7 +7,8 @@ import { Config } from './Config.ts'
 import { Git } from './Git.ts'
 import { GitHub } from './GitHub.ts'
 import { normalize } from './normalize.ts'
-import { cacheOptions, SortKey, storeFailuresDie } from './Store.ts'
+import { makeSteps } from './steps.ts'
+import { cacheOptions, peek, SortKey, storeFailuresDie } from './Store.ts'
 import { buildTrusted } from './trusted.ts'
 
 const instructions = readFileSync(new URL('../prompts/sort.md', import.meta.url), 'utf8')
@@ -18,6 +19,8 @@ export class Sorter extends Context.Service<
   Sorter,
   {
     sort(ref: PrRef, headSha: string): Effect.Effect<SortResult, SortError>
+    /** The sort if one is cached, without running it. */
+    cached(ref: PrRef, headSha: string): Effect.Effect<SortResult | undefined>
     /** What a running sort is doing: the current step, then each new one. Never ends; interrupt it when the sort is done. */
     steps(ref: PrRef, headSha: string): Stream.Stream<string>
   }
@@ -29,14 +32,13 @@ export class Sorter extends Context.Service<
       const github = yield* GitHub
       const agent = yield* Agent
       const config = yield* Config
-      const published = yield* PubSub.unbounded<{ key: string; step: string }>()
-      const latest = new Map<string, string>()
+      const steps = yield* makeSteps
       const keyOf = (k: { host: string; owner: string; repo: string; number: number; headSha: string }) => `${k.host}/${k.owner}/${k.repo}#${k.number}@${k.headSha}`
 
       const run = Effect.fn('Sorter.run')(function* ({ host, owner, repo, number, headSha }: SortKey) {
         const repoKey = `${host}/${owner}/${repo}`
         const key = keyOf({ host, owner, repo, number, headSha })
-        const report = (step: string) => Effect.andThen(Effect.sync(() => void latest.set(key, step)), PubSub.publish(published, { key, step }))
+        const report = steps.report(key)
         yield* report('Fetching the PR')
         const { review } = yield* config.settings
         const gh = yield* github.forHost(host)
@@ -75,21 +77,11 @@ export class Sorter extends Context.Service<
       })
 
       const cache = yield* PersistedCache.make(run, { storeId: 'sort', ...cacheOptions })
+      const read = yield* peek('sort')
       return Sorter.of({
         sort: (ref, headSha) => storeFailuresDie(cache.get(new SortKey({ ...ref, headSha }))),
-        steps: (ref, headSha) =>
-          Stream.unwrap(
-            Effect.gen(function* () {
-              const key = keyOf({ ...ref, headSha })
-              // Subscribe before reading the current step, so no step falls between the two.
-              const sub = yield* PubSub.subscribe(published)
-              const current = latest.get(key)
-              return Stream.concat(
-                Stream.fromIterable(current ? [current] : []),
-                Stream.fromSubscription(sub).pipe(Stream.filter((e) => e.key === key), Stream.map((e) => e.step)),
-              )
-            }),
-          ),
+        cached: (ref, headSha) => read(new SortKey({ ...ref, headSha })),
+        steps: (ref, headSha) => steps.follow(keyOf({ ...ref, headSha })),
       })
     }),
   )

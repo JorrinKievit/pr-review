@@ -103,6 +103,8 @@ export const relay = (native: NativeConnect, pages: OnConnectLike, settings: Eff
         GetFilePatch: (p) => call((c) => c.GetFilePatch(p)),
         Sort: (p) => stream((c) => c.Sort(p)),
         SetState: (p) => call((c) => c.SetState(p)),
+        Opinion: (p) => stream((c) => c.Opinion(p)),
+        SetFindingState: (p) => call((c) => c.SetFindingState(p)),
         Ask: (p) => stream((c) => c.Ask(p)),
         Stack: (p) => stream((c) => c.Stack(p)),
         GetChats: (p) => call((c) => c.GetChats(p)),

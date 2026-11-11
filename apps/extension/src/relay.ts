@@ -35,15 +35,17 @@ export const relay = (native: NativeConnect, pages: OnConnectLike, settings: Eff
       let pageCount = 0
       let idle: Fiber.Fiber<void> | undefined
       let holdUntil = 0
+      const hold = (ms: number) => Effect.map(Clock.currentTimeMillis, (now) => void (holdUntil = Math.max(holdUntil, now + ms)))
       /** Closes the host when `holdUntil` passes, unless a page came back; each call replaces the pending timer. */
       const armIdle = (ms: number) =>
         Effect.gen(function* () {
-          holdUntil = Math.max(holdUntil, (yield* Clock.currentTimeMillis) + ms)
+          yield* hold(ms)
           if (idle) yield* Fiber.interrupt(idle)
           idle = run(
             Effect.suspend(() => Clock.currentTimeMillis).pipe(
               Effect.flatMap((now) => Effect.sleep(Math.max(0, holdUntil - now))),
-              Effect.andThen(Effect.suspend(() => (current ? close(current) : Effect.void))),
+              // A page may have connected while this timer was being replaced.
+              Effect.andThen(Effect.suspend(() => (current && pageCount === 0 ? close(current) : Effect.void))),
             ),
           )
         })
@@ -136,11 +138,18 @@ export const relay = (native: NativeConnect, pages: OnConnectLike, settings: Eff
         SubmitReview: (p) => call((c) => c.SubmitReview(p)),
       })
 
-      // Early start from a PR page: best effort, no companion means nothing happens.
+      // Early start from a PR page: best effort, no companion means nothing happens. Held open longer only for a run
+      // that started; with a page open the hold still counts once the last page leaves.
       prepares?.addListener((ref) =>
         run(
-          Effect.ignore(call((c) => c.Prepare({ ref }))).pipe(
-            Effect.andThen(Effect.suspend(() => (pageCount === 0 ? armIdle(Duration.toMillis(Duration.fromInputUnsafe(PREPARE_HOLD))) : Effect.void))),
+          call((c) => c.Prepare({ ref })).pipe(
+            Effect.orElseSucceed(() => false),
+            Effect.flatMap((started) =>
+              Effect.suspend(() => {
+                const ms = Duration.toMillis(Duration.fromInputUnsafe(started ? PREPARE_HOLD : IDLE))
+                return pageCount === 0 ? armIdle(ms) : started ? hold(ms) : Effect.void
+              }),
+            ),
           ),
         ),
       )

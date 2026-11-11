@@ -34,8 +34,8 @@ export class ReviewRpcs extends RpcGroup.make(
     error: Schema.Union([RepoNotConfigured, GitError, GitHubError, AgentError, CompanionUnavailable]),
     stream: true,
   }),
-  /** Starts preparing a review early, so it is ready when the reviewer opens it. */
-  Rpc.make('Prepare', { payload: { ref: PrRef }, error: CompanionUnavailable }),
+  /** Starts preparing a review early, so it is ready when the reviewer opens it. True when it started (or one was running). */
+  Rpc.make('Prepare', { payload: { ref: PrRef }, success: Schema.Boolean, error: CompanionUnavailable }),
   Rpc.make('SetState', {
     payload: { ref: PrRef, headSha: Schema.String, decisionId: Schema.String, state: Schema.NullOr(DecisionState) },
     error: CompanionUnavailable,

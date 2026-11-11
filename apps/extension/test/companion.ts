@@ -22,7 +22,7 @@ export const fakeCompanion = (
     GetFilePatch: ({ path }) => Effect.succeed(`patch of ${path}`),
     Sort: () => spaced(o.sortEvents).pipe(Stream.ensuring(Effect.sync(() => o.onSortEnd?.()))),
     Review: () => spaced(o.reviewEvents),
-    Prepare: () => Effect.void,
+    Prepare: () => Effect.succeed(true),
     GetPr: unused,
     SetState: unused,
     Opinion: () => Stream.make({ _tag: 'Idle' as const }),

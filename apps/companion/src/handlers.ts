@@ -290,8 +290,10 @@ export const HandlersLive = ReviewRpcs.toLayer(
           yield* config.repo(repoKeyOf(ref))
           const gh = yield* github.forHost(ref.host)
           const [pr, asked, me] = yield* Effect.all([gh.getPr(ref.owner, ref.repo, ref.number), gh.requestedReviewers(ref.owner, ref.repo, ref.number), gh.viewer()], { concurrency: 3 })
-          if (asked.some((login) => login.toLowerCase() === me.toLowerCase())) yield* reviewer.prepare(ref, pr.headSha)
-        }).pipe(Effect.ignore({ log: 'Debug' })),
+          if (!asked.some((login) => login.toLowerCase() === me.toLowerCase())) return false
+          yield* reviewer.prepare(ref, pr.headSha)
+          return true
+        }).pipe(Effect.catch((e) => Effect.as(Effect.logDebug(e), false))),
 
       Opinion: ({ ref, headSha, run }) => {
         const done = (opinion: PrOpinion) => Effect.map(findingStatesFor(ref, headSha), (states): OpinionEvent => ({ _tag: 'Done', opinion, states }))

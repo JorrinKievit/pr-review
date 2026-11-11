@@ -445,12 +445,12 @@ describe('handlers', () => {
   it.live('Prepare ignores PRs the viewer is not asked to review', () =>
     Effect.gen(function* () {
       const other = setup({ delay: 100, github: { requestedReviewers: () => Effect.succeed(['ann']) } })
-      yield* (yield* other.client).Prepare({ ref })
+      assert.isFalse(yield* (yield* other.client).Prepare({ ref }))
       yield* Effect.sleep('30 millis')
       assert.strictEqual(other.agent.calls.length, 0)
 
       const asked = setup({ delay: 100, github: { requestedReviewers: () => Effect.succeed(['ann', 'Me']) } })
-      yield* (yield* asked.client).Prepare({ ref })
+      assert.isTrue(yield* (yield* asked.client).Prepare({ ref }))
       yield* Effect.sleep('30 millis')
       assert.deepStrictEqual(asked.agent.calls.map((x) => x.log.kind), ['sort'])
     }).pipe(Effect.scoped))

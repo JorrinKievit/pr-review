@@ -382,6 +382,9 @@ export const HandlersLive = ReviewRpcs.toLayer(
         Stream.callback<StackEvent, Effect.Error<ReturnType<typeof openStack>>>((queue) =>
           Effect.gen(function* () {
             const { stack } = yield* openStack(ref)
+            // The bottom PR is where the reviewer starts; opening each PR then prepares the one above it.
+            const bottom = stack[0]
+            if (bottom) yield* reviewer.prepare({ ...ref, number: bottom.number }, bottom.headSha)
             const entries: StackEntryStatus[] = yield* Effect.forEach(stack, (pr) =>
               Effect.gen(function* () {
                 const prRef = { ...ref, number: pr.number }

@@ -168,11 +168,17 @@ describe('handlers', () => {
       assert.isTrue(kinds.lastIndexOf('sort') < kinds.indexOf('stack-opinion'))
     }).pipe(Effect.scoped))
 
-  it.live('no PR opinion runs from the stack view', () =>
+  it.live('the stack view judges the bottom PR only', () =>
     Effect.gen(function* () {
-      const { agent, client } = setup()
-      yield* Stream.runCollect((yield* client).Stack({ ref }))
-      assert.strictEqual(opinionCalls(agent.calls), 0)
+      const sort = { decisions: [d1], skim: [], claims: [] }
+      const { agent, client } = setup({
+        files: [{ path: 'src/a.ts', additions: 300, deletions: 0 }],
+        sorts: [sort, sort],
+        github: { listOpenPrs: () => Effect.succeed([entry(7, 'master', 'feat'), entry(8, 'feat', 'feat2')]) },
+      })
+      yield* Stream.runCollect((yield* client).Stack({ ref: { ...ref, number: 8 } }))
+      yield* Effect.sleep('50 millis')
+      assert.deepStrictEqual(agent.calls.filter((x) => x.log.kind === 'opinion').map((x) => x.log.number), [7])
     }).pipe(Effect.scoped))
 
   it.live('Stack ends with why the overview failed, so the page stops waiting for it', () =>

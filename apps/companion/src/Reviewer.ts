@@ -1,4 +1,5 @@
-import { type AgentAccount, type AgentError, AgentOpinion, AgentSort, type Decision, impact, opinionsMode, type Phase, type PrOpinion, type PrRef, repoSettings, type SortResult } from '@pr-review/domain'
+import { type AgentAccount, type AgentError, AgentOpinion, AgentQuick, AgentSort, type Decision, impact, opinionsMode, type Phase, type PrOpinion, type PrRef, repoSettings, smallPrLines, type SortResult } from '@pr-review/domain'
+import { readFileSync } from 'node:fs'
 import { Clock, Context, Deferred, Effect, Fiber, Layer, Stream, SubscriptionRef } from 'effect'
 import { Agent, type AgentTurns, type SessionOptions } from './Agent.ts'
 import { Config } from './Config.ts'
@@ -7,6 +8,9 @@ import { GitHub } from './GitHub.ts'
 import { type OpinionContext, Opiner } from './Opiner.ts'
 import { type SortError, Sorter } from './Sorter.ts'
 import { Store } from './Store.ts'
+import { buildTrusted } from './trusted.ts'
+
+const quickInstructions = readFileSync(new URL('../prompts/quick.md', import.meta.url), 'utf8')
 
 export type Review = { sort: SortResult; opinion: PrOpinion | null; opinionError?: string }
 
@@ -69,8 +73,74 @@ export class Reviewer extends Context.Service<
       const keyOf = (ref: PrRef, headSha: string) => `${ref.host}/${ref.owner}/${ref.repo}#${ref.number}@${headSha}`
       const runs = new Map<string, { phases: Phases; done: Deferred.Deferred<Review, SortError> }>()
 
-      /** Task 4: small PRs get one quick read. Undefined means sort as usual. */
-      const quick = (_ref: PrRef, _headSha: string, _t: Tracker): Effect.Effect<Review | undefined, SortError> => Effect.undefined
+      /** Small PRs get one turn on the whole change instead of piles. Undefined means sort as usual. */
+      const quick = Effect.fnUntraced(function* (ref: PrRef, headSha: string, t: Tracker) {
+        const repoKey = `${ref.host}/${ref.owner}/${ref.repo}`
+        const settings = yield* config.settings
+        const gh = yield* github.forHost(ref.host)
+        const pr = yield* gh.getPr(ref.owner, ref.repo, ref.number)
+        const { headSha: head, mergeBase } = yield* git.fetchPr(repoKey, ref.number, pr.baseRef, headSha)
+        const [files, checks] = yield* Effect.all([git.numstat(repoKey, mergeBase, head), gh.getChecks(ref.owner, ref.repo, head)], { concurrency: 2 })
+        const { groups, rest } = buildTrusted(files, checks, settings.review.likelyTrusted, settings.review.neverTrust)
+        const lines = rest.reduce((n, f) => n + f.additions + f.deletions, 0)
+        if (lines >= smallPrLines(settings)) return undefined
+
+        const contextFiber = yield* Effect.forkChild(opiner.context(ref, headSha))
+        yield* t.end('fetch', 'done')
+        yield* t.begin('quick', `Reading the change: ${lines} lines in ${plural(rest.length, 'file')}`)
+        const c = yield* Fiber.join(contextFiber).pipe(Effect.onError(() => t.end('quick', 'failed')))
+        const changes: Decision = {
+          id: 'changes',
+          title: 'The change as a whole',
+          lens: 'quality',
+          reason: 'convention',
+          theme: 'Changes',
+          note: '',
+          existing: null,
+          authorWhy: null,
+          files: rest.map((f) => ({ path: f.path, ranges: [] })),
+        }
+        const prompt = `${yield* c.prompt([changes])}\n\n${quickInstructions}`
+        const options: SessionOptions = {
+          cwd: c.cwd,
+          related: c.related,
+          log: { kind: 'sort', owner: ref.owner, repo: ref.repo, number: ref.number, headSha },
+          onStep: (s) => Effect.suspend(() => t.worker('quick', 0, (w) => ({ ...w, step: s, recent: w.step ? [...w.recent, w.step].slice(-4) : w.recent }))),
+        }
+        const answer = yield* agent
+          .session(options, (turns, account) =>
+            Effect.andThen(
+              t.worker('quick', 0, (w) => ({ ...w, account: account.name })),
+              turns.structured(prompt, AgentQuick, 'main', 'sort'),
+            ),
+          )
+          .pipe(Effect.onError(() => t.end('quick', 'failed')))
+
+        const sort: SortResult = {
+          headSha: head,
+          mergeBase,
+          summary: answer.summary,
+          decisions: [],
+          skim: [{ area: 'Changes', summary: answer.summary, files: rest.map((f) => f.path) }],
+          trusted: groups,
+          claims: [],
+          unclaimedDecisionIds: [],
+          lines: { decision: 0, skim: lines, trusted: files.reduce((n, f) => n + f.additions + f.deletions, 0) - lines },
+          quick: true,
+        }
+        yield* sorter.remember(ref, headSha, sort)
+        const made = yield* Effect.result(c.finish({ decisions: [{ decisionId: 'changes', authorCase: answer.authorCase, checked: answer.checked, findings: answer.findings }] }, [changes]))
+        let opinion: PrOpinion | undefined
+        let opinionError: string | undefined
+        if (made._tag === 'Failure') opinionError = made.failure.message
+        else {
+          opinion = made.success
+          yield* opiner.remember(ref, headSha, opinion)
+          yield* Effect.orDie(store.lastOpinion.set(`${repoKey}#${ref.number}`, { headSha, mergeBase, opinion }))
+        }
+        yield* t.end('quick', 'done')
+        return { sort, opinion: opinion ?? null, ...(opinionError ? { opinionError } : {}) } satisfies Review
+      })
 
       const work = Effect.fnUntraced(function* (ref: PrRef, headSha: string, t: Tracker) {
         const repoKey = `${ref.host}/${ref.owner}/${ref.repo}`

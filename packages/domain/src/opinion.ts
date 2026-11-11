@@ -54,6 +54,14 @@ export const AgentDecisionOpinion = Struct({
 })
 export type AgentDecisionOpinion = typeof AgentDecisionOpinion.Type
 
+export const AgentQuick = Struct({
+  summary: String.annotate({ description: 'One plain sentence: what this PR does.' }),
+  authorCase: String.annotate({ description: "The author's best case for the change." }),
+  checked: NullOr(String).annotate({ description: 'What was checked, when there are no findings.' }),
+  findings: Array(AgentFinding),
+})
+export type AgentQuick = typeof AgentQuick.Type
+
 export const AgentOpinion = Struct({ decisions: Array(AgentDecisionOpinion) })
 export type AgentOpinion = typeof AgentOpinion.Type
 

@@ -1,5 +1,5 @@
 import { assert, describe, it } from '@effect/vitest'
-import { type AgentAccount, AgentError, type AgentOpinion, type AgentSort, type Decision, type Phase } from '@pr-review/domain'
+import { type AgentAccount, AgentError, type AgentQuick, type FileStat, type AgentOpinion, type AgentSort, type Decision, type Phase } from '@pr-review/domain'
 import { Deferred, Effect, Layer, Option, Stream } from 'effect'
 import { KeyValueStore } from 'effect/persistence'
 import { Opiner } from '../src/Opiner.ts'
@@ -30,14 +30,14 @@ const opinionOn = (prompt: string): AgentOpinion => ({
 const idsIn = (call: AgentCall) => [...call.prompt.split('# Decisions\n').at(-1)!.matchAll(/"id":"(\w+)"/g)].map(([, id]) => id)
 
 const setup = (
-  o: { decisions?: Decision[]; pool?: ReadonlyArray<AgentAccount>; opinion?: (call: AgentCall) => Effect.Effect<unknown, AgentError>; sort?: (call: AgentCall) => Effect.Effect<unknown, AgentError> } = {},
+  o: { stats?: FileStat[]; decisions?: Decision[]; pool?: ReadonlyArray<AgentAccount>; opinion?: (call: AgentCall) => Effect.Effect<unknown, AgentError>; sort?: (call: AgentCall) => Effect.Effect<unknown, AgentError> } = {},
 ) => {
   const agent = fakeAgent(
     (call) => (call.log.kind === 'opinion' ? (o.opinion?.(call) ?? Effect.succeed(opinionOn(call.prompt))) : (o.sort?.(call) ?? Effect.succeed(sortOf(o.decisions ?? many)))),
     undefined,
     o.pool,
   )
-  const files = (o.decisions ?? many).map((d) => ({ path: d.files[0]!.path, additions: 5, deletions: 1 }))
+  const files = o.stats ?? (o.decisions ?? many).map((d) => ({ path: d.files[0]!.path, additions: 100, deletions: 1 }))
   const deps = Layer.mergeAll(agent.layer, fakeGit({ files, diff: 'THE DIFF' }).layer, fakeGitHub(), configLayer(), Layer.succeed(Tickets, Tickets.of({ summary: () => Effect.succeed({ text: null, note: 'none' }) })))
   const layer = Reviewer.layer.pipe(Layer.provideMerge(Opiner.layer), Layer.provideMerge(Sorter.layer), Layer.provideMerge(Store.layerWith(KeyValueStore.layerMemory)), Layer.provideMerge(deps))
   return { agent, layer }
@@ -48,7 +48,53 @@ const review = Effect.gen(function* () {
 })
 const turns = (calls: ReadonlyArray<AgentCall>) => calls.map((c) => `${c.session}/${c.account}/${c.turn}/${c.model}/${c.log.kind}`)
 
+const stat = (path: string, additions: number, deletions = 0): FileStat => ({ path, additions, deletions })
+const quickAnswer = (call: AgentCall): AgentQuick => ({ summary: 'Adds a thing.', authorCase: `case for ${call.log.number}`, checked: 'looked', findings: [] })
+const quickSetup = (stats: FileStat[]) => setup({ stats, sort: (call) => (call.prompt.includes('This PR is small') ? Effect.succeed(quickAnswer(call)) : Effect.succeed(sortOf(few))) })
+
 describe('Reviewer', () => {
+  it.effect('a 120-line PR takes the quick path in one turn', () =>
+    Effect.gen(function* () {
+      const { agent, layer } = quickSetup([stat('src/a.ts', 100, 5), stat('src/b.ts', 15)])
+      const r = yield* review.pipe(Effect.provide(layer))
+      assert.deepStrictEqual(turns(agent.calls), ['1/fake/0/main/sort'])
+      assert.isTrue(r.sort.quick)
+      assert.match(agent.calls[0]!.prompt, /THE DIFF/)
+    }))
+
+  it.effect("test and lockfile lines don't count", () =>
+    Effect.gen(function* () {
+      const { agent, layer } = quickSetup([stat('src/a.test.ts', 500), stat('pnpm-lock.yaml', 300), stat('src/a.ts', 50)])
+      const r = yield* review.pipe(Effect.provide(layer))
+      assert.strictEqual(agent.calls.length, 1)
+      assert.isTrue(r.sort.quick)
+      assert.deepStrictEqual(r.sort.skim[0]?.files, ['src/a.ts'])
+      assert.isAbove(r.sort.trusted.length, 0)
+    }))
+
+  it.effect('a 300-line PR sorts', () =>
+    Effect.gen(function* () {
+      const { agent, layer } = quickSetup([stat('src/h1.ts', 300)])
+      const r = yield* review.pipe(Effect.provide(layer))
+      assert.isUndefined(r.sort.quick)
+      assert.strictEqual(agent.calls[0]!.log.kind, 'sort')
+      assert.notMatch(agent.calls[0]!.prompt, /This PR is small/)
+    }))
+
+  it.effect('quick result has a Changes area and an opinion on it, in the caches', () =>
+    Effect.gen(function* () {
+      const { layer } = quickSetup([stat('src/a.ts', 30)])
+      const { r, sorted, opined } = yield* Effect.gen(function* () {
+        const r = yield* review
+        return { r, sorted: yield* (yield* Sorter).cached(ref, 'HEAD1'), opined: yield* (yield* Opiner).cached(ref, 'HEAD1') }
+      }).pipe(Effect.provide(layer))
+      assert.deepInclude(r.sort.skim[0], { area: 'Changes', summary: 'Adds a thing.', files: ['src/a.ts'] })
+      assert.deepStrictEqual(r.sort.decisions, [])
+      assert.deepStrictEqual(r.opinion?.decisions.map((d) => [d.decisionId, d.authorCase]), [['changes', 'case for 7']])
+      assert.isTrue(sorted?.quick)
+      assert.strictEqual(opined?.decisions.length, 1)
+    }))
+
   it.effect('sort and high-impact opinion run in one session, low-impact on an idle second account', () =>
     Effect.gen(function* () {
       const { agent, layer } = setup({ pool: [fakeAccount, fakeAccount2] })

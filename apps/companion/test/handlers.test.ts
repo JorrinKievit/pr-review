@@ -400,7 +400,7 @@ describe('handlers', () => {
 
   it.live('Review streams Preparing then Done', () =>
     Effect.gen(function* () {
-      const { agent, client } = setup({ delay: 100, sorts: [{ decisions: [d1], skim: [], claims: [] }] })
+      const { agent, client } = setup({ delay: 100, files: [{ path: 'src/a.ts', additions: 300, deletions: 0 }], sorts: [{ decisions: [d1], skim: [], claims: [] }] })
       const c = yield* client
       const events = yield* Stream.runCollect(c.Review({ ref, headSha: 'HEAD1' }))
       const t = tags(events)

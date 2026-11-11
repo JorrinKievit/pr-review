@@ -1,5 +1,5 @@
 import { Schema } from 'effect'
-import { PrOpinion } from './opinion.ts'
+import { FindingStates, PrOpinion } from './opinion.ts'
 
 export const FileStat = Schema.Struct({
   path: Schema.String,
@@ -205,6 +205,8 @@ export const StackEntryStatus = Schema.Struct({
   step: Schema.optionalKey(Schema.String),
   /** The PR opinion cached for this head, if one ran. */
   opinion: Schema.optionalKey(PrOpinion),
+  /** What the reviewer did with that opinion's findings. */
+  opinionStates: Schema.optionalKey(FindingStates),
 })
 export type StackEntryStatus = typeof StackEntryStatus.Type
 

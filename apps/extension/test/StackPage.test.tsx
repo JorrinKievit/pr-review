@@ -314,6 +314,7 @@ test('a stack item changed since its verdict says so', async () => {
     },
   ])
   const nav = await screen.findByRole('navigation', { name: 'Stack' }, { timeout: 3000 })
+  within(nav).getByText('1 decision changed since you looked')
   await userEvent.click(within(nav).getByRole('button', { name: /#2567/ }))
   expect(await screen.findByText(/You accepted this on an earlier push/, undefined, { timeout: 3000 })).toBeInTheDocument()
 })
@@ -348,6 +349,15 @@ test('stack and PR findings rank together, bottom PR first within a severity', a
   const titles = () => within(screen.getByRole('list', { name: "Claude's findings" })).getAllByRole('listitem').map((li) => /Title [sp]\d/.exec(li.textContent!)![0])
   await waitFor(() => expect(titles()).toEqual(['Title s0', 'Title p1', 'Title s1', 'Title p0']), { timeout: 3000 })
   expect(within(screen.getByRole('list', { name: 'PRs in this stack' })).getAllByText('No opinion yet')).toHaveLength(1)
+})
+
+test('dismissed PR findings stay hidden, and findings with the same id on two PRs both show', async () => {
+  const same = (pr: number) => finding('money:x', pr, 'should', { decisionId: 'money', title: `Same id on #${pr}` })
+  const data = two({ 2567: prOpinion([same(2567), finding('gone', 2567, 'ask', { decisionId: 'money' })]), 2568: prOpinion([same(2568)]) })
+  data.entries[0] = { ...data.entries[0]!, opinionStates: { gone: 'dismissed' } } as (typeof data.entries)[number]
+  renderStack([data])
+  const list = await screen.findByRole('list', { name: "Claude's findings" }, { timeout: 3000 })
+  expect(within(list).getAllByRole('listitem').map((li) => li.querySelector('b')!.textContent)).toEqual(['Same id on #2567', 'Same id on #2568'])
 })
 
 test('a stack finding opens its PR', async () => {

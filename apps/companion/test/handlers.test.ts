@@ -482,8 +482,12 @@ describe('handlers', () => {
       const c = yield* setup({ sorts: [{ decisions: [d1], skim: [], claims: [] }], github: { listOpenPrs: () => Effect.succeed([entry(7, 'master', 'feat'), entry(8, 'feat', 'feat2')]) } }).client
       yield* Stream.runCollect(c.Opinion({ ref, headSha: 'sha7', run: true }))
       const last = (yield* Stream.runCollect(c.Stack({ ref }))).at(-1)!
-      assert.deepStrictEqual(last.entries.map((e) => e.opinion?.decisions[0]?.findings[0]?.id), [contentIds('d1:', ['f\nt'])[0], undefined])
+      const id = contentIds('d1:', ['f\nt'])[0]!
+      assert.deepStrictEqual(last.entries.map((e) => e.opinion?.decisions[0]?.findings[0]?.id), [id, undefined])
       assert.notProperty(last.entries[1]!, 'opinion')
+      yield* c.SetFindingState({ ref, headSha: 'sha7', findingId: id, state: 'dismissed' })
+      const again = (yield* Stream.runCollect(c.Stack({ ref }))).at(-1)!
+      assert.deepStrictEqual(again.entries[0]!.opinionStates, { [id]: 'dismissed' })
     }).pipe(Effect.scoped))
 
   it.effect('StackOpinion run false is Idle', () =>

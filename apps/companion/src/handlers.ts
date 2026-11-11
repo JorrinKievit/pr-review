@@ -327,7 +327,12 @@ export const HandlersLive = ReviewRpcs.toLayer(
           Effect.gen(function* () {
             const { stack } = yield* openStack(ref)
             const entries: StackEntryStatus[] = yield* Effect.forEach(stack, (pr) =>
-              Effect.map(opiner.cached({ ...ref, number: pr.number }, pr.headSha), (opinion): StackEntryStatus => ({ pr, status: 'queued', result: null, error: null, state: {}, ...(opinion ? { opinion } : {}) })),
+              Effect.gen(function* () {
+                const prRef = { ...ref, number: pr.number }
+                const opinion = yield* opiner.cached(prRef, pr.headSha)
+                const entry: StackEntryStatus = { pr, status: 'queued', result: null, error: null, state: {} }
+                return opinion ? { ...entry, opinion, opinionStates: yield* findingStatesFor(prRef, pr.headSha) } : entry
+              }),
             )
             let overviewResult: StackEvent['overview'] = null
             let overviewError: string | undefined

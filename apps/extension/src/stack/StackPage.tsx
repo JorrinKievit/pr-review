@@ -74,6 +74,7 @@ function Loaded({ prRef, entries, overview, overviewError }: { prRef: PrRef; ent
     if (id === undefined) return undefined
     return r.key in overrides ? (overrides[r.key] ?? undefined) : entries.find((e) => e.pr.number === r.pr.number)?.state[id]
   }
+  const changed = entries.reduce((n, e) => n + Object.keys(e.rereview ?? {}).length, 0)
   const rereviewOf = (r: Row) => entries.find((e) => e.pr.number === r.pr.number)?.rereview?.[itemId(r.item) ?? '']
   const reviewable = ordered.filter((r) => itemId(r.item) !== undefined)
   const [reviewOpen, setReviewOpen] = useState(false)
@@ -193,6 +194,7 @@ function Loaded({ prRef, entries, overview, overviewError }: { prRef: PrRef; ent
       </header>
       <div className="flex min-h-0 flex-1">
         <nav aria-label="Stack" className="w-80 shrink-0 overflow-y-auto border-r border-border bg-card px-1.5 py-2">
+          {changed > 0 && <p className="mx-2 mb-1 text-xs text-warn">{`${changed} ${changed === 1 ? 'decision' : 'decisions'} changed since you looked`}</p>}
           <button
             type="button"
             aria-current={sel.kind === 'overview'}

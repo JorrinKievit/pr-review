@@ -143,7 +143,10 @@ function StackFindings(props: { prRef: PrRef; entries: ReadonlyArray<StackEntryS
   const cached = useAtomValue(stackOpinionAtom(props.prRef, false))
   const stackFindings = AsyncResult.isSuccess(cached) && cached.value._tag === 'Done' ? cached.value.opinion.findings : []
   const pending = running && !(AsyncResult.isSuccess(cached) && cached.value._tag === 'Done')
-  const all: Finding[] = [...stackFindings, ...props.entries.flatMap((e) => e.opinion?.decisions.flatMap((d) => d.findings) ?? [])]
+  const all: Finding[] = [
+    ...stackFindings,
+    ...props.entries.flatMap((e) => e.opinion?.decisions.flatMap((d) => d.findings.filter((f) => e.opinionStates?.[f.id] !== 'dismissed')) ?? []),
+  ]
   const rows = rankFindings(all, props.entries.map((e) => e.pr.number))
   const fromStack = new Set(stackFindings)
   return (
@@ -161,7 +164,7 @@ function StackFindings(props: { prRef: PrRef; entries: ReadonlyArray<StackEntryS
       ) : (
         <ul aria-label="Claude's findings" className="flex flex-col gap-1">
           {rows.map((f) => (
-            <li key={f.id}>
+            <li key={`${f.pr}:${f.id}`}>
               <button
                 type="button"
                 onClick={() => (fromStack.has(f) || f.decisionId === null ? props.onOpen(f.pr) : props.onOpenDecision(f.pr, f.decisionId))}

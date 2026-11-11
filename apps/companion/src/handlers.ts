@@ -220,6 +220,15 @@ export const HandlersLive = ReviewRpcs.toLayer(
       return { gh, defaultBranch, stack: buildStack([...prs], ref.number, defaultBranch) }
     })
 
+    /** The PR stacked right on top of this one gets its review prepared, so it's ready when the reviewer moves up. */
+    const prepareAbove = (ref: PrRef) =>
+      Effect.gen(function* () {
+        const { stack } = yield* openStack(ref)
+        const self = stack.find((p) => p.number === ref.number)
+        const above = self && stack.find((p) => p.baseRef === self.headRef)
+        if (above) yield* reviewer.prepare({ ...ref, number: above.number }, above.headSha)
+      }).pipe(Effect.catch((e) => Effect.logDebug(e)))
+
     return {
       Health: () => Effect.succeed({ version: VERSION }),
 
@@ -265,6 +274,8 @@ export const HandlersLive = ReviewRpcs.toLayer(
             yield* config.repo(repoKeyOf(ref))
             yield* reviewer.prepare(ref, headSha)
             const { fiber, cached } = yield* startIn(scope, reviewer.result(ref, headSha))
+            // After this PR's run, so it never waits on the one above for an agent slot.
+            yield* Effect.forkIn(Effect.andThen(Fiber.await(fiber), prepareAbove(ref)), scope)
             const end = Stream.fromEffect(
               Effect.gen(function* () {
                 const r = yield* Fiber.join(fiber)

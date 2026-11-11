@@ -442,6 +442,14 @@ describe('handlers', () => {
       assert.deepStrictEqual(tags(yield* Stream.runCollect(c.Review({ ref, headSha: 'HEAD1' }))), ['Done'])
     }).pipe(Effect.scoped))
 
+  it.live('opening a stacked PR prepares the one right above it, not further up', () =>
+    Effect.gen(function* () {
+      const { agent, client } = setup({ files: [{ path: 'src/a.ts', additions: 300, deletions: 0 }], github: { listOpenPrs: () => Effect.succeed([entry(7, 'master', 'feat'), entry(8, 'feat', 'feat2'), entry(9, 'feat2', 'feat3')]) } })
+      yield* Stream.runCollect((yield* client).Review({ ref, headSha: 'HEAD1' }))
+      yield* Effect.sleep('50 millis')
+      assert.deepStrictEqual(agent.calls.map((x) => x.log.number), [7, 8])
+    }).pipe(Effect.scoped))
+
   it.live('Prepare ignores PRs the viewer is not asked to review', () =>
     Effect.gen(function* () {
       const other = setup({ delay: 100, github: { requestedReviewers: () => Effect.succeed(['ann']) } })

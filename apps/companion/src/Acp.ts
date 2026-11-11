@@ -24,6 +24,7 @@ export type Launch = (account: AgentAccount, cwd: string) => Effect.Effect<{ tar
 const disallowedTools = ['Edit', 'Write', 'NotebookEdit', 'WebFetch', 'WebSearch', 'Task']
 const claudeOptions = { claudeCode: { options: { settingSources: [], disallowedTools } } }
 // The ticket session loads the user's own config so their tracker MCP servers are there; it never sees PR code, and can't read files or fetch URLs.
+// Residual risk: tools the user auto-allows in that config are approved by Claude Code itself and never reach ticketPermission.
 const ticketOptions = { claudeCode: { options: { settingSources: ['user'], disallowedTools: [...disallowedTools, 'Read', 'Glob', 'Grep', 'Bash'] } } }
 const READ_ONLY_MODES = [/read.?only/i, /^ask$/i, /^plan$/i, /^default$/i, /manual/i]
 

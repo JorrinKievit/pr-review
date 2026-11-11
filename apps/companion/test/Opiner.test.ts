@@ -177,7 +177,7 @@ describe('Opiner', () => {
     Effect.gen(function* () {
       const { agent, layer, opine } = setup({ repos: { 'h/o/r': { related: [{ repo: 'h/o/svc', note: 'permissions' }] } } })
       yield* opine.pipe(Effect.provide(layer))
-      assert.match(agent.calls[0]!.prompt, /# Related repos[^\n]*\nh\/o\/svc: permissions\n[\s\S]*gh api --hostname <host> -H 'Accept: application\/vnd\.github\.raw' repos\/<owner>\/<repo>\/contents\/<file>[\s\S]*git\/trees\/<branch>\?recursive=1[\s\S]*search\/code/)
+      assert.match(agent.calls[0]!.prompt, /# Related repos[^\n]*\nh\/o\/svc: permissions\n[\s\S]*gh api --hostname <host> -H 'Accept: application\/vnd\.github\.raw' repos\/<owner>\/<repo>\/contents\/<file>[\s\S]*git\/trees\/HEAD\?recursive=1[\s\S]*search\/code/)
       assert.deepStrictEqual(agent.calls[0]!.related, ['h/o/svc'])
     }))
 
@@ -193,6 +193,7 @@ describe('Opiner', () => {
             findings: [
               finding({ evidence: [{ ref: 'related', repo: 'h/o/svc', path: 'app/X.php', line: 1, quote: 'enum Perm' }] }),
               finding({ evidence: [{ ref: 'related', repo: 'h/o/unlisted', path: 'app/X.php', line: 1, quote: 'enum Perm' }] }),
+              finding({ evidence: [{ ref: 'related', repo: 'H/O/Svc', path: 'app/X.php', line: 1, quote: 'enum Perm' }] }),
             ],
           },
         ],
@@ -202,10 +203,11 @@ describe('Opiner', () => {
         repos: { 'h/o/r': { related: [{ repo: 'h/o/svc', note: 'n' }] } },
         fileAt: (o, r, p) => Effect.sync(() => (asked.push(`${o}/${r}:${p}`), 'enum Perm {}\n')),
       })
-      const [ok, unlisted] = (yield* opine.pipe(Effect.provide(layer))).decisions[0]!.findings
-      assert.deepStrictEqual(asked, ['o/svc:app/X.php'])
+      const [ok, unlisted, cased] = (yield* opine.pipe(Effect.provide(layer))).decisions[0]!.findings
+      assert.deepStrictEqual(asked, ['o/svc:app/X.php', 'O/Svc:app/X.php'])
       assert.isTrue(ok!.verified)
       assert.isFalse(unlisted!.verified)
+      assert.isTrue(cased!.verified)
     }))
 
   it.effect('cached per head: a second opine does not call the agent', () =>

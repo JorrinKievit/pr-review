@@ -25,11 +25,12 @@ export const safeGitCommand = (raw: string) => {
 }
 
 const NAME = '[\\w.-]+'
-const REF = '[\\w.\\/-]+'
+const FILE = '[\\w.\\/-]+'
+// Default branch only (no ?ref=, trees at HEAD); search terms can't carry encoded or extra qualifiers.
 const GH_PATHS = [
-  new RegExp(`^repos/(${NAME}/${NAME})/contents/${REF}(?:\\?ref=${REF})?$`),
-  new RegExp(`^repos/(${NAME}/${NAME})/git/trees/${REF}(?:\\?recursive=1)?$`),
-  new RegExp(`^search/code\\?q=[\\w.%+-]+?\\+repo:(${NAME}/${NAME})$`),
+  new RegExp(`^repos/(${NAME}/${NAME})/contents/${FILE}$`),
+  new RegExp(`^repos/(${NAME}/${NAME})/git/trees/HEAD(?:\\?recursive=1)?$`),
+  new RegExp(`^search/code\\?q=[\\w.+-]+?\\+repo:(${NAME}/${NAME})$`),
 ]
 const RAW = 'Accept: application/vnd.github.raw'
 
@@ -39,7 +40,8 @@ export const safeGhCommand = (raw: string, related: ReadonlyArray<string>) => {
   if (SHELL_META.test(command) || !BALANCED_QUOTES.test(command)) return false
   const tokens = (command.match(/(?:[^\s'"]|'[^']*'|"[^"]*")+/g) ?? []).map((t) => t.replace(/['"]/g, ''))
   if (tokens[0] !== 'gh' || tokens[1] !== 'api') return false
-  let host = 'github.com'
+  // Required: without it gh picks its own default host, which may not be the one checked here.
+  let host: string | undefined
   let path: string | undefined
   for (let i = 2; i < tokens.length; i++) {
     const t = tokens[i]!
@@ -48,7 +50,7 @@ export const safeGhCommand = (raw: string, related: ReadonlyArray<string>) => {
     else if (t.startsWith('-') || path !== undefined) return false
     else path = t
   }
-  if (path === undefined || path.split(/[/?]/).includes('..')) return false
+  if (host === undefined || path === undefined || path.split(/[/?]/).includes('..')) return false
   const repo = GH_PATHS.map((r) => r.exec(path!)?.[1]).find(Boolean)
   return repo !== undefined && related.some((r) => r.toLowerCase() === `${host}/${repo}`.toLowerCase())
 }

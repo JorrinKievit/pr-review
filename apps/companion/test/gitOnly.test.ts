@@ -53,15 +53,20 @@ describe('gitOnly', () => {
     it('allows reads of related repos', () => {
       assert.isTrue(gh("gh api --hostname h repos/o/svc/contents/app/Enums/X.php -H 'Accept: application/vnd.github.raw'"))
       assert.isTrue(gh("gh api --hostname h 'search/code?q=PlanningPermissions+repo:o/svc'"))
-      assert.isTrue(gh('gh api --hostname h repos/o/svc/git/trees/main?recursive=1'))
-      assert.isTrue(gh('gh api --hostname h repos/o/svc/contents/a.php?ref=main'))
-      assert.isTrue(safeGhCommand('gh api repos/o/svc/contents/a', ['github.com/o/svc']))
+      assert.isTrue(gh('gh api --hostname h repos/o/svc/git/trees/HEAD?recursive=1'))
+      assert.isTrue(safeGhCommand('gh api --hostname github.com repos/O/Svc/contents/a', ['github.com/o/svc']))
     })
 
     it('denies other repos, hosts, methods, outputs and shell syntax', () => {
       for (const c of [
         'gh api --hostname h repos/o/other/contents/a',
         'gh api repos/o/svc/contents/a',
+        "gh api 'search/code?q=x+repo:o/svc'",
+        "gh api --hostname h 'search/code?q=x+repo%3Aother%2Fx+repo:o/svc'",
+        "gh api --hostname h 'search/code?q=x+org%3Aacme+repo:o/svc'",
+        "gh api --hostname h 'search/code?q=x+org:acme+repo:o/svc'",
+        'gh api --hostname h repos/o/svc/contents/a.php?ref=feature',
+        'gh api --hostname h repos/o/svc/git/trees/feature?recursive=1',
         "gh api --hostname h 'search/code?q=x+repo:o/other'",
         "gh api --hostname h 'search/code?q=x+repo:o/other+repo:o/svc'",
         'gh api -X POST repos/o/svc/issues',

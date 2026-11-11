@@ -73,9 +73,12 @@ function AccountCard(props: { account: AgentAccount; status: AccountStatus | und
           <Textarea rows={2} className="font-mono text-sm" value={env} placeholder={preset?.loginEnv ? `${preset.loginEnv}=~/.my-other-login` : ''} onChange={(e) => setEnv(e.target.value)} onBlur={() => set({ env: envOf(env) })} />
         </Field>
         <div className="flex gap-4 text-sm text-muted-foreground sm:col-span-2">
-          <label className="flex items-center gap-1.5">
-            <input type="checkbox" checked={a.tickets ?? false} onChange={(e) => set({ tickets: e.target.checked })} /> Can read tickets
-          </label>
+          <div className="flex flex-col gap-0.5">
+            <label className="flex items-center gap-1.5">
+              <input type="checkbox" checked={a.tickets ?? false} onChange={(e) => set({ tickets: e.target.checked })} /> Can read tickets
+            </label>
+            <span className="text-xs text-dim">Only for an account whose auto-allowed tools are read-only. The ticket session loads its own settings.</span>
+          </div>
           <label className="flex items-center gap-1.5">
             <input type="checkbox" checked={a.deep ?? false} onChange={(e) => set({ deep: e.target.checked })} /> Use for Dig deeper
           </label>

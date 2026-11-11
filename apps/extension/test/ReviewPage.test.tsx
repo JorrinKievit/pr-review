@@ -469,3 +469,9 @@ test('an item changed since it was pushed back opens as a follow-up: what you sa
   await heading('Decision one')
   expect(screen.queryByRole('region', { name: 'Follow-up' })).toBeNull()
 })
+
+test('sidebar says how many decisions changed since you looked', async () => {
+  renderPage({ sort: Stream.concat(Stream.make({ ...done, rereview: { one: { since: 'OLD', was: 'accepted' }, two: { since: 'OLD', was: 'accepted' } } } as SortEvent), Stream.never) })
+  await heading('Decision one')
+  screen.getByText('2 decisions changed since you looked')
+})

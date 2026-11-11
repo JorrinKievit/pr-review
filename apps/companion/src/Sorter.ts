@@ -71,7 +71,7 @@ export class Sorter extends Context.Service<
           onStep: report,
         })
         yield* report('Checking the answer')
-        return normalize(sorted, files, groups, head, review.neverTrust)
+        return normalize(sorted, files, groups, head, review.neverTrust, mergeBase)
       })
 
       const cache = yield* PersistedCache.make(run, { storeId: 'sort', ...cacheOptions })

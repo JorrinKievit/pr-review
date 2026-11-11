@@ -16,6 +16,7 @@ export function Sidebar(props: { items: ReadonlyArray<Item>; selected: number; s
   ] as const
   const lines = props.result?.lines
   const total = lines ? lines.decision + lines.skim + lines.trusted || 1 : 1
+  const changed = Object.keys(props.rereview).length
   const verdictOf = (item: Item) => props.states[itemId(item) ?? '']
 
   const row = ({ item, i }: Row) => (
@@ -72,6 +73,7 @@ export function Sidebar(props: { items: ReadonlyArray<Item>; selected: number; s
           <i className="block rounded-sm bg-dim" style={{ width: `${(lines.trusted / total) * 100}%` }} />
         </div>
       )}
+      {changed > 0 && <p className="mx-2 mb-1 text-xs text-warn">{`${changed} ${changed === 1 ? 'decision' : 'decisions'} changed since you looked`}</p>}
       {groups.map((g) => {
         const rows = props.items.map((item, i) => ({ item, i })).filter((r) => r.item.kind === g.kind)
         if (rows.length === 0) return null

@@ -14,6 +14,7 @@ const Drafts = Schema.Array(Draft)
 /** The verdicts on the head last worked on, with each decision's files, so a push can carry them over. */
 export const LastVerdicts = Schema.Struct({
   headSha: Schema.String,
+  mergeBase: Schema.optionalKey(Schema.String),
   decisions: Schema.Array(Schema.Struct({ id: Schema.String, paths: Schema.Array(Schema.String), state: DecisionState })),
 })
 

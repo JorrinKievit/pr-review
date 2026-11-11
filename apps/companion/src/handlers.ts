@@ -7,6 +7,7 @@ import { Agent } from './Agent.ts'
 import { Config } from './Config.ts'
 import { Git } from './Git.ts'
 import { GitHub } from './GitHub.ts'
+import { sameChange } from './interdiff.ts'
 import { Overview } from './Overview.ts'
 import { Sorter } from './Sorter.ts'
 import { buildStack } from './stack.ts'
@@ -81,7 +82,7 @@ export const HandlersLive = ReviewRpcs.toLayer(
 
     const keepLast = (ref: PrRef, headSha: string, result: SortResult, states: DecisionStates) =>
       store.lastVerdicts
-        .set(prKey(ref), { headSha, decisions: reviewables(result).flatMap((r) => (states[r.id] ? [{ ...r, state: states[r.id]! }] : [])) })
+        .set(prKey(ref), { headSha, ...(result.mergeBase ? { mergeBase: result.mergeBase } : {}), decisions: reviewables(result).flatMap((r) => (states[r.id] ? [{ ...r, state: states[r.id]! }] : [])) })
         .pipe(Effect.orDie)
 
     const samePaths = (a: ReadonlyArray<string>, b: ReadonlyArray<string>) => a.length === b.length && a.every((p) => b.includes(p))
@@ -103,8 +104,13 @@ export const HandlersLive = ReviewRpcs.toLayer(
         for (const { id, paths } of reviewables(result)) {
           const before = last.decisions.find((e) => e.id === id || samePaths(e.paths, paths))
           if (!before) continue
-          const unchanged = yield* git.diff(repoKeyOf(ref), last.headSha, headSha, [...new Set([...paths, ...before.paths])]).pipe(
-            Effect.map((diff) => diff === ''),
+          const all = [...new Set([...paths, ...before.paths])]
+          const repo = repoKeyOf(ref)
+          const unchanged = yield* (
+            last.mergeBase && result.mergeBase
+              ? Effect.map(Effect.all([git.diff(repo, last.mergeBase, last.headSha, all), git.diff(repo, result.mergeBase, headSha, all)]), ([a, b]) => sameChange(a, b))
+              : Effect.map(git.diff(repo, last.headSha, headSha, all), (diff) => diff === '')
+          ).pipe(
             // The old head may be gone from the clone; then nothing is carried.
             Effect.orElseSucceed(() => false),
           )

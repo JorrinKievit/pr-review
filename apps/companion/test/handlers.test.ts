@@ -1,14 +1,20 @@
 import { assert, describe, it } from '@effect/vitest'
 import { AgentError, type AgentSort, type Decision, type FileStat, ReviewRejected, ReviewRpcs, RepoNotConfigured, type StackEntry } from '@pr-review/domain'
+import { NodeServices } from '@effect/platform-node'
 import { Effect, Fiber, Layer, Logger, Stream } from 'effect'
+import { writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { KeyValueStore } from 'effect/persistence'
 import { RpcTest } from 'effect/rpc'
 import { Asker } from '../src/Asker.ts'
+import { Config } from '../src/Config.ts'
+import { Git } from '../src/Git.ts'
 import { CompanionRpcs, HandlersLive, LoggedLive } from '../src/handlers.ts'
 import { Overview } from '../src/Overview.ts'
 import { Sorter } from '../src/Sorter.ts'
 import { Store } from '../src/Store.ts'
 import { configLayer, fakeAgent, fakeGit, fakeGitHub, overviewReply, pr, ref } from './fakes.ts'
+import { git, makeRemote, tmp } from './helpers.ts'
 import { TestClock } from 'effect/testing'
 
 const entry = (number: number, baseRef: string, headRef: string): StackEntry => ({ number, title: `#${number}`, baseRef, headRef, headSha: `sha${number}` })
@@ -218,7 +224,7 @@ describe('handlers', () => {
       const c = yield* setup({
         files: [{ path: 'src/a.ts', additions: 1, deletions: 0 }, { path: 'src/b.ts', additions: 1, deletions: 0 }, { path: 'src/c.ts', additions: 1, deletions: 0 }],
         // Between the two heads only b.ts changed.
-        diff: (from, to, paths) => (from === 'HEAD1' && to === 'HEAD2' ? (paths.includes('src/b.ts') ? 'changed' : '') : 'd'),
+        diff: (_from, to, paths) => (to === 'HEAD2' && paths.includes('src/b.ts') ? 'changed' : 'd'),
         sorts: [
           { decisions: [decision('a', 'src/a.ts'), decision('b', 'src/b.ts')], skim: [{ area: 'Wiring', summary: 's', files: ['src/c.ts'] }], claims: [] },
           // The new sort names a's decision differently; it still covers the same file.
@@ -237,6 +243,39 @@ describe('handlers', () => {
       yield* c.SetState({ ref, headSha: 'HEAD2', decisionId: 'skim:Wiring', state: null })
       const again = (yield* Stream.runCollect(c.Sort({ ref, headSha: 'HEAD2' }))).at(-1)!
       assert.deepStrictEqual(again._tag === 'Done' ? again.rereview : undefined, { b: { since: 'HEAD1', was: 'pushed-back' } })
+    }).pipe(Effect.scoped))
+
+  it.live('a rebase that only moved the base carries the verdict', () =>
+    Effect.gen(function* () {
+      const remote = makeRemote()
+      const lines = (first: string) => `${first}\n${Array.from({ length: 20 }, (_, i) => `line ${i}`).join('\n')}\n`
+      const commit = (msg: string) => (git(remote, 'add', '.'), git(remote, 'commit', '-qm', msg))
+      git(remote, 'checkout', '-q', 'master')
+      writeFileSync(join(remote, 'm.txt'), lines('top'))
+      commit('m')
+      git(remote, 'checkout', '-q', 'feat')
+      git(remote, 'rebase', '-q', 'master')
+      writeFileSync(join(remote, 'm.txt'), lines('top').replace('line 15', 'changed'))
+      commit('feat edits m')
+      git(remote, 'update-ref', 'refs/pull/7/head', 'feat')
+      const decision = (id: string, path: string): Decision => ({ id, title: id, lens: 'architecture', reason: 'data-model', theme: 't', note: 'n', existing: null, authorWhy: null, files: [{ path, ranges: [] }] })
+      const reply = { decisions: [decision('a', 'm.txt')], skim: [], claims: [] }
+      const realGit = Git.layer.pipe(Layer.provide(Config.layerTest({ cacheRoot: tmp(), remotes: { 'h/o/r': `file://${remote}` } })), Layer.provideMerge(NodeServices.layer))
+      const c = yield* setup({ sorts: [reply, reply], git: { layer: realGit } as ReturnType<typeof fakeGit> }).client
+      const head1 = git(remote, 'rev-parse', 'feat')
+      yield* Stream.runCollect(c.Sort({ ref, headSha: head1 }))
+      yield* c.SetState({ ref, headSha: head1, decisionId: 'a', state: 'accepted' })
+      git(remote, 'checkout', '-q', 'master')
+      writeFileSync(join(remote, 'm.txt'), lines('top').replace('top', 'new top\nsecond top'))
+      commit('base moves')
+      git(remote, 'checkout', '-q', 'feat')
+      git(remote, 'rebase', '-q', 'master')
+      git(remote, 'update-ref', 'refs/pull/7/head', 'feat')
+      const head2 = git(remote, 'rev-parse', 'feat')
+      assert.notStrictEqual(head2, head1)
+      const done = (yield* Stream.runCollect(c.Sort({ ref, headSha: head2 }))).at(-1)!
+      assert.strictEqual(done._tag === 'Done' ? done.state.a : undefined, 'accepted')
+      assert.deepStrictEqual(done._tag === 'Done' ? done.rereview : undefined, {})
     }).pipe(Effect.scoped))
 
   it.effect('GetPr reads the PR while the open PRs load, and later shows the open PRs as last seen', () =>

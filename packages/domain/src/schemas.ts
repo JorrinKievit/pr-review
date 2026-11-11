@@ -113,6 +113,8 @@ export type AgentSort = typeof AgentSort.Type
 
 export const SortResult = Schema.Struct({
   headSha: Schema.String,
+  /** Absent on sorts cached before re-review compared against the merge base. */
+  mergeBase: Schema.optionalKey(Schema.String),
   /** Absent on sorts cached before summaries existed. */
   summary: Schema.optionalKey(Schema.String),
   decisions: Schema.Array(Decision),

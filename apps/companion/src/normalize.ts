@@ -5,7 +5,7 @@ import { neverTrusted } from './trusted.ts'
  * Make the agent's sort safe to show: real paths only, every file placed. Claude decides what is trusted; rule
  * candidates it left unplaced keep their rule group, and paths that always need a human never are. When in doubt, up a pile.
  */
-export function normalize(agent: AgentSort, files: ReadonlyArray<FileStat>, candidates: ReadonlyArray<TrustedGroup>, headSha: string, never: ReadonlyArray<string> = []): SortResult {
+export function normalize(agent: AgentSort, files: ReadonlyArray<FileStat>, candidates: ReadonlyArray<TrustedGroup>, headSha: string, never: ReadonlyArray<string> = [], mergeBase?: string): SortResult {
   const known = new Set(files.map((f) => f.path))
 
   const decisions = agent.decisions
@@ -40,6 +40,7 @@ export function normalize(agent: AgentSort, files: ReadonlyArray<FileStat>, cand
 
   return {
     headSha,
+    ...(mergeBase ? { mergeBase } : {}),
     ...(agent.summary ? { summary: agent.summary } : {}),
     decisions,
     skim,

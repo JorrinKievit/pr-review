@@ -1,4 +1,4 @@
-import { type DecisionState, type DecisionStates, type Draft, type FindingStates, type OpinionEvent, type PrOpinion, type PrRef, type Rereview, ReviewRpcs, type SortResult, type SortEvent, type StackEntry, type StackEntryStatus, type StackEvent, targetKey } from '@pr-review/domain'
+import { type DecisionState, type DeeperEvent, type DecisionStates, type Draft, type FindingStates, type OpinionEvent, type PrOpinion, type PrRef, type Rereview, ReviewRpcs, type SortResult, type SortEvent, type StackEntry, type StackEntryStatus, type StackEvent, targetKey } from '@pr-review/domain'
 import { Cause, Clock, Effect, Exit, Fiber, Layer, Option, Queue, type Scope, Stream } from 'effect'
 import { RpcMiddleware } from 'effect/rpc'
 import { PersistedCache } from 'effect/persistence'
@@ -212,6 +212,9 @@ export const HandlersLive = ReviewRpcs.toLayer(
         if (run) return progress(scope, opiner.opine(ref, headSha), opiner.steps(ref, headSha), done)
         return Stream.unwrap(Effect.map(opiner.cached(ref, headSha), (hit) => (hit ? Stream.fromEffect(done(hit)) : Stream.succeed<OpinionEvent>({ _tag: 'Idle' }))))
       },
+
+      DigDeeper: ({ ref, headSha, decisionId }) =>
+        progress(scope, opiner.deeper(ref, headSha, decisionId), opiner.steps(ref, headSha, decisionId), (opinion) => Effect.succeed<DeeperEvent>({ _tag: 'Done', opinion })),
 
       SetFindingState: ({ ref, headSha, findingId, state }) =>
         Effect.gen(function* () {

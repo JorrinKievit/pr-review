@@ -1,4 +1,4 @@
-import { AgentError, AskTarget, ChatTurn, DecisionState, DecisionStates, Draft, FileStat, FindingStates, GitError, GitHubError, PrOpinion, RepoNotConfigured, Rereview, SortResult, StackOverview } from '@pr-review/domain'
+import { AgentError, AskTarget, ChatTurn, DecisionOpinion, DecisionState, DecisionStates, Draft, FileStat, FindingStates, GitError, GitHubError, PrOpinion, RepoNotConfigured, Rereview, SortResult, StackOverview } from '@pr-review/domain'
 import { Context, Effect, Exit, Layer, Schema } from 'effect'
 import { KeyValueStore, Persistable, Persistence } from 'effect/persistence'
 import { NodeServices } from '@effect/platform-node'
@@ -32,6 +32,12 @@ export class SortKey extends Persistable.Class<{ payload: { host: string; owner:
 export class OpinionKey extends Persistable.Class<{ payload: { host: string; owner: string; repo: string; number: number; headSha: string } }>()('OpinionKey', {
   primaryKey: (k) => digest(`${k.host}/${k.owner}/${k.repo}#${k.number}@${k.headSha}`),
   success: PrOpinion,
+  error: errors,
+}) {}
+
+export class DeeperKey extends Persistable.Class<{ payload: { host: string; owner: string; repo: string; number: number; headSha: string; decisionId: string } }>()('DeeperKey', {
+  primaryKey: (k) => digest(`${k.host}/${k.owner}/${k.repo}#${k.number}@${k.headSha} deeper ${k.decisionId}`),
+  success: DecisionOpinion,
   error: errors,
 }) {}
 

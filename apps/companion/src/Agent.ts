@@ -5,7 +5,7 @@ import { Acp } from './Acp.ts'
 import { Config } from './Config.ts'
 
 export type RunLog = { kind: 'sort' | 'ask' | 'chat' | 'overview' | 'opinion' | 'deeper' | 'stack-opinion' | 'ticket' | 'rule'; owner: string; repo: string; number: number; headSha: string }
-type Run = { prompt: string; cwd: string; related?: ReadonlyArray<string>; log: RunLog; onStep?: (step: string) => Effect.Effect<void> }
+type Run = { prompt: string; cwd: string; related?: ReadonlyArray<string>; /** Only `deep` accounts when the pool has any, else the whole pool. */ prefer?: 'deep'; log: RunLog; onStep?: (step: string) => Effect.Effect<void> }
 
 
 const LIMITED = /usage limit|rate.?limit|quota|too many requests|\b429\b|limit reached|hit your limit|resets? (at|in)/i
@@ -56,7 +56,9 @@ export class Agent extends Context.Service<
           Effect.gen(function* () {
             let waiting = false
             for (;;) {
-              const pool = (yield* config.settings).accounts.filter((a) => eligible(a, tickets) && !avoid.has(a.id) && (only === undefined || a.id === only))
+              const all = (yield* config.settings).accounts.filter((a) => eligible(a, tickets) && !avoid.has(a.id) && (only === undefined || a.id === only))
+              const deep = o.prefer === 'deep' ? all.filter((a) => a.deep === true) : []
+              const pool = deep.length ? deep : all
               if (pool.length === 0)
                 return yield* new AgentError({
                   message: only

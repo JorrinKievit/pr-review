@@ -82,6 +82,23 @@ describe('Agent.structured', () => {
       }).pipe(Effect.provide(layer))
     }))
 
+  it.live('prefer deep picks a deep account', () =>
+    Effect.gen(function* () {
+      const { layer, opened } = setup(() => Effect.succeed('{"ok": true}'), [account('a'), { ...account('b'), deep: true }])
+      const agent = yield* Agent.pipe(Effect.provide(layer))
+      yield* agent.structured({ prompt: 'x', schema: Ok, cwd: '/repo', log, prefer: 'deep' })
+      yield* agent.structured({ prompt: 'x', schema: Ok, cwd: '/repo', log, prefer: 'deep' })
+      assert.deepStrictEqual(opened.map((o) => o.account), ['b', 'b'])
+    }))
+
+  it.live('prefer deep falls back to the pool', () =>
+    Effect.gen(function* () {
+      const { layer, opened } = setup(() => Effect.succeed('{"ok": true}'), [account('a'), { ...account('b'), deep: true, enabled: false }])
+      const agent = yield* Agent.pipe(Effect.provide(layer))
+      yield* agent.structured({ prompt: 'x', schema: Ok, cwd: '/repo', log, prefer: 'deep' })
+      assert.deepStrictEqual(opened.map((o) => o.account), ['a'])
+    }))
+
   it.live('an account at its usage limit sits out, and the run moves to another', () =>
     Effect.gen(function* () {
       const { layer, opened } = setup((a) => (a.id === 'a' ? Effect.fail(new AgentError({ message: "You've hit your usage limit" })) : Effect.succeed('{"ok": true}')))

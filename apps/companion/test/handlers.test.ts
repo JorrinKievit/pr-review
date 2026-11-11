@@ -57,7 +57,7 @@ const setup = (
       ? Effect.fail(new AgentError({ message: o.overviewFails }))
       : Effect.as(
           o.delay ? Effect.sleep(o.delay) : Effect.void,
-          call.log.kind === 'overview' ? overviewReply : call.log.kind === 'opinion' ? opinionReply : (o.sorts?.[sorted++] ?? sortReply),
+          call.log.kind === 'overview' ? overviewReply : call.log.kind === 'opinion' || call.log.kind === 'deeper' ? opinionReply : (o.sorts?.[sorted++] ?? sortReply),
         ),
   )
   const deps = Layer.mergeAll(agent.layer, (o.git ?? fakeGit({ files: o.files ?? files, diff: o.diff ?? 'd' })).layer, fakeGitHub({ listOpenPrs: () => Effect.succeed([entry(7, 'master', 'feat')]), ...o.github }), configLayer())
@@ -371,6 +371,17 @@ describe('handlers', () => {
       // Cached now: a page opening later gets it without asking for a run.
       assert.deepStrictEqual(tags(yield* Stream.runCollect(c.Opinion({ ref, headSha: 'HEAD1', run: false }))), ['Done'])
       assert.strictEqual(opinionCalls(agent.calls), 1)
+    }).pipe(Effect.scoped))
+
+  it.live('DigDeeper streams Running then Done', () =>
+    Effect.gen(function* () {
+      const { agent, client } = setup({ delay: 100, sorts: [{ decisions: [d1], skim: [], claims: [] }] })
+      const c = yield* client
+      const events = yield* Stream.runCollect(c.DigDeeper({ ref, headSha: 'HEAD1', decisionId: 'd1' }))
+      assert.deepStrictEqual([...new Set(tags(events))], ['Running', 'Done'])
+      const done = events.at(-1)!
+      assert.deepInclude(done._tag === 'Done' && done.opinion, { decisionId: 'd1', deep: true })
+      assert.strictEqual(agent.calls.filter((x) => x.log.kind === 'deeper').length, 1)
     }).pipe(Effect.scoped))
 
   it.effect('Opinion run true re-runs when a PR above has a new head', () =>

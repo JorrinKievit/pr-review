@@ -62,8 +62,8 @@ const finding = (o: Partial<AgentFinding> = {}): AgentFinding => ({
   ...o,
 })
 
-const setup = (o: { reply?: AgentOpinion; show?: Record<string, string>; repos?: (typeof defaultSettings)['repos']; prs?: StackEntry[]; fileAt?: GitHubClient['fileAt']; ticket?: TicketSummary } = {}) => {
-  const agent = fakeAgent(() => Effect.succeed(o.reply ?? { decisions: [{ decisionId: 'd1', authorCase: 'c', checked: 'looked', findings: [] }] }))
+const setup = (o: { reply?: AgentOpinion | ((kind: string) => AgentOpinion); show?: Record<string, string>; repos?: (typeof defaultSettings)['repos']; prs?: StackEntry[]; fileAt?: GitHubClient['fileAt']; ticket?: TicketSummary } = {}) => {
+  const agent = fakeAgent((call) => Effect.succeed((typeof o.reply === 'function' ? o.reply(call.log.kind) : o.reply) ?? { decisions: [{ decisionId: 'd1', authorCase: 'c', checked: 'looked', findings: [] }] }))
   const git = fakeGit({ files: [{ path: 'src/a.ts', additions: 3, deletions: 1 }], diff: 'diff --git a/src/a.ts\n+added', rules: ['AGENTS.md'], show: o.show ?? {} })
   const config = Config.layerTest({ cacheRoot: '/cache', settings: { ...defaultSettings, hosts: [ref.host], ...(o.repos ? { repos: o.repos } : {}) } })
   const layer = Opiner.layer.pipe(
@@ -218,5 +218,29 @@ describe('Opiner', () => {
         assert.deepStrictEqual(yield* (yield* Opiner).cached(ref, 'HEAD1'), first)
       }).pipe(Effect.provide(layer))
       assert.strictEqual(agent.calls.length, 1)
+    }))
+
+  it.effect('deeper replaces that decision\'s findings in the PR opinion', () =>
+    Effect.gen(function* () {
+      sorts[7] = sortOf([decision('d1', 'src/a.ts'), decision('d2', 'src/a.ts', 9)])
+      const answer = (title: string): AgentOpinion => ({ decisions: ['d1', 'd2'].map((id) => ({ decisionId: id, authorCase: 'c', checked: null, findings: [finding({ title: `${title} ${id}` })] })) })
+      const { agent, layer } = setup({ reply: (kind) => answer(kind === 'deeper' ? 'deep' : 'first') })
+      yield* Effect.gen(function* () {
+        const opiner = yield* Opiner
+        yield* opiner.opine(ref, 'HEAD1')
+        const d = yield* opiner.deeper(ref, 'HEAD1', 'd2')
+        assert.deepInclude(d, { decisionId: 'd2', deep: true })
+        assert.strictEqual(d.findings[0]!.title, 'deep d2')
+        const merged = [yield* opiner.cached(ref, 'HEAD1'), yield* opiner.opine(ref, 'HEAD1')]
+        for (const o of merged) assert.deepStrictEqual(o!.decisions.map((x) => [x.findings[0]!.title, x.deep]), [['first d1', false], ['deep d2', true]])
+        yield* opiner.deeper(ref, 'HEAD1', 'd2')
+      }).pipe(Effect.provide(layer), Effect.ensuring(Effect.sync(() => void (sorts[7] = sortOf([decision('d1', 'src/a.ts')])))))
+      const last = agent.calls[1]!
+      assert.deepInclude(last, { prefer: 'deep' })
+      assert.strictEqual(last.log.kind, 'deeper')
+      assert.match(last.prompt, /# Decisions\n\[\{"id":"d2"[^]*\]\n/)
+      assert.notMatch(last.prompt, /"id":"d1"/)
+      assert.match(last.prompt, /Take your time on this one decision; read every file it touches in full\./)
+      assert.strictEqual(agent.calls.length, 2)
     }))
 })

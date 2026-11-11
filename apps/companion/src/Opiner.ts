@@ -1,4 +1,4 @@
-import { AgentOpinion, type DecisionOpinion, type Evidence, type FileStat, type PrOpinion, type PrRef, repoSettings, type SortResult, type StackEntry } from '@pr-review/domain'
+import { AgentError, AgentOpinion, type DecisionOpinion, type Evidence, type FileStat, type PrOpinion, type PrRef, repoSettings, type SortResult, type StackEntry } from '@pr-review/domain'
 import { Context, Effect, Layer, type Stream } from 'effect'
 import { PersistedCache } from 'effect/persistence'
 import { readFileSync } from 'node:fs'
@@ -11,7 +11,7 @@ import { type SortError, Sorter } from './Sorter.ts'
 import { buildStack } from './stack.ts'
 import { Tickets } from './Tickets.ts'
 import { makeSteps } from './steps.ts'
-import { cacheOptions, OpinionKey, peek, storeFailuresDie } from './Store.ts'
+import { cacheOptions, DeeperKey, OpinionKey, peek, storeFailuresDie } from './Store.ts'
 
 const bundledSkill = readFileSync(new URL('../prompts/review-skill/SKILL.md', import.meta.url), 'utf8')
 
@@ -55,7 +55,9 @@ export class Opiner extends Context.Service<
     /** Cached per head, until a PR above it in the stack has a new head. */
     opine(ref: PrRef, headSha: string): Effect.Effect<PrOpinion, SortError>
     /** As `Sorter.steps`. */
-    steps(ref: PrRef, headSha: string): Stream.Stream<string>
+    steps(ref: PrRef, headSha: string, decisionId?: string): Stream.Stream<string>
+    /** One decision re-run on the strongest model; replaces that decision in `cached`/`opine` results. Cached per head. */
+    deeper(ref: PrRef, headSha: string, decisionId: string): Effect.Effect<DecisionOpinion, SortError>
   }
 >()('pr-review/Opiner') {
   static readonly layer = Layer.effect(
@@ -81,20 +83,22 @@ export class Opiner extends Context.Service<
         return { stack, above: stack.slice(i + 1).filter((e) => heads.has(e.baseRef) && heads.add(e.headRef)) }
       })
 
-      const run = Effect.fn('Opiner.run')(function* ({ host, owner, repo, number, headSha }: OpinionKey) {
+      const analyse = Effect.fn('Opiner.run')(function* ({ host, owner, repo, number, headSha }: { host: string; owner: string; repo: string; number: number; headSha: string }, only?: string) {
         const ref = { host, owner, repo, number }
         const repoKey = `${host}/${owner}/${repo}`
-        const report = steps.report(keyOf({ ...ref, headSha }))
+        const report = steps.report(only ? `${keyOf({ ...ref, headSha })}/${only}` : keyOf({ ...ref, headSha }))
         yield* report('Fetching the PR')
         const settings = yield* config.settings
         const { review } = settings
         const gh = yield* github.forHost(host)
         const pr = yield* gh.getPr(owner, repo, number)
         const { headSha: head, mergeBase } = yield* git.fetchPr(repoKey, number, pr.baseRef, headSha)
-        const [sort, files, { stack, above }, defaultBranch, ticket] = yield* Effect.all(
+        const [fullSort, files, { stack, above }, defaultBranch, ticket] = yield* Effect.all(
           [sorter.sort(ref, headSha), git.numstat(repoKey, mergeBase, head), stackOf(ref), git.defaultBranch(repoKey), tickets.summary(ref, pr)],
           { concurrency: 5 },
         )
+        const sort = only ? { ...fullSort, decisions: fullSort.decisions.filter((d) => d.id === only) } : fullSort
+        if (only && sort.decisions.length === 0) return yield* new AgentError({ message: `This PR has no decision ${only} to dig into` })
         const master = `origin/${defaultBranch}`
         const { related, reviewSkill: skillPath } = repoSettings(settings, repoKey)
         const skill = skillPath
@@ -144,6 +148,7 @@ export class Opiner extends Context.Service<
           diff.length > review.maxDiffKb * 1000
             ? `# Diff\nDiff too large; read files with git show ${head}:<path> and compare with git diff ${mergeBase} ${head} -- <path>`
             : `# Diff\n${diff || '(no decision files)'}`,
+          ...(only ? ['# Depth\nTake your time on this one decision; read every file it touches in full.'] : []),
         ].join('\n\n')
 
         const answer = yield* agent.structured({
@@ -151,7 +156,8 @@ export class Opiner extends Context.Service<
           schema: AgentOpinion,
           cwd: git.dir(repoKey),
           related: related.map((r) => r.repo),
-          log: { kind: 'opinion', owner, repo, number, headSha: head },
+          ...(only ? { prefer: 'deep' as const } : {}),
+          log: { kind: only ? 'deeper' : 'opinion', owner, repo, number, headSha: head },
           onStep: report,
         })
         yield* report('Checking the citations')
@@ -168,18 +174,33 @@ export class Opiner extends Context.Service<
         return { headSha: head, ticket: ticket.text, ticketNote: ticket.note, decisions, stackHeads: headsOf(above) } satisfies PrOpinion
       })
 
+      const run = (key: OpinionKey) => analyse(key)
+      const runDeeper = (key: DeeperKey) =>
+        Effect.flatMap(analyse(key, key.decisionId), (o) => {
+          const d = o.decisions.find((x) => x.decisionId === key.decisionId)
+          return d ? Effect.succeed({ ...d, deep: true }) : Effect.fail(new AgentError({ message: `The agent gave no opinion on decision ${key.decisionId}` }))
+        })
       const cache = yield* PersistedCache.make(run, { storeId: 'opinion', ...cacheOptions })
+      const deeperCache = yield* PersistedCache.make(runDeeper, { storeId: 'deeper', ...cacheOptions })
       const read = yield* peek('opinion')
+      const readDeeper = yield* peek('deeper')
+      const withDeeper = (ref: PrRef, headSha: string, o: PrOpinion) =>
+        Effect.map(
+          Effect.forEach(o.decisions, (d) => Effect.map(readDeeper(new DeeperKey({ ...ref, headSha, decisionId: d.decisionId })), (hit) => hit ?? d)),
+          (decisions): PrOpinion => ({ ...o, decisions }),
+        )
       return Opiner.of({
-        cached: (ref, headSha) => read(new OpinionKey({ ...ref, headSha })),
+        cached: (ref, headSha) =>
+          Effect.flatMap(read(new OpinionKey({ ...ref, headSha })), (hit) => (hit ? withDeeper(ref, headSha, hit) : Effect.undefined)),
         opine: (ref, headSha) =>
           Effect.gen(function* () {
             const key = new OpinionKey({ ...ref, headSha })
             const hit = yield* read(key)
             if (hit && !sameHeads(hit.stackHeads, headsOf((yield* stackOf(ref)).above))) yield* Effect.orDie(cache.invalidate(key))
-            return yield* storeFailuresDie(cache.get(key))
+            return yield* withDeeper(ref, headSha, yield* storeFailuresDie(cache.get(key)))
           }),
-        steps: (ref, headSha) => steps.follow(keyOf({ ...ref, headSha })),
+        deeper: (ref, headSha, decisionId) => storeFailuresDie(deeperCache.get(new DeeperKey({ ...ref, headSha, decisionId }))),
+        steps: (ref, headSha, decisionId) => steps.follow(decisionId ? `${keyOf({ ...ref, headSha })}/${decisionId}` : keyOf({ ...ref, headSha })),
       })
     }),
   )

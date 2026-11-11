@@ -2,7 +2,7 @@ import { Schema } from 'effect'
 import { Rpc, RpcGroup } from 'effect/rpc'
 import { AgentError, CompanionUnavailable, ReviewRejected, GitError, GitHubError, RepoNotConfigured } from './errors.ts'
 import { AskEvent, AskTarget, Chat, DecisionState, Draft, PrRef, PrView, SortEvent, StackEvent } from './schemas.ts'
-import { FindingState, OpinionEvent } from './opinion.ts'
+import { DeeperEvent, FindingState, OpinionEvent } from './opinion.ts'
 import { AccountStatus, Settings } from './settings.ts'
 
 // CompanionUnavailable is raised by the extension's background when the native host is missing or gone.
@@ -35,6 +35,13 @@ export class ReviewRpcs extends RpcGroup.make(
   Rpc.make('Opinion', {
     payload: { ref: PrRef, headSha: Schema.String, run: Schema.Boolean },
     success: OpinionEvent,
+    error: Schema.Union([RepoNotConfigured, GitError, GitHubError, AgentError, CompanionUnavailable]),
+    stream: true,
+  }),
+  /** One decision's opinion re-run on the strongest model; its result replaces that decision's findings. */
+  Rpc.make('DigDeeper', {
+    payload: { ref: PrRef, headSha: Schema.String, decisionId: Schema.String },
+    success: DeeperEvent,
     error: Schema.Union([RepoNotConfigured, GitError, GitHubError, AgentError, CompanionUnavailable]),
     stream: true,
   }),

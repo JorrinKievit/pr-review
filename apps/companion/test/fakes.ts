@@ -10,7 +10,7 @@ export const repoKey = 'h/o/r'
 
 export const configLayer = (cacheRoot = '/cache') => Config.layerTest({ cacheRoot, settings: { ...defaultSettings, hosts: [ref.host] } })
 
-export type AgentCall = { prompt: string; cwd: string; related?: ReadonlyArray<string>; resume?: string; log: { kind: string; number: number } }
+export type AgentCall = { prompt: string; cwd: string; related?: ReadonlyArray<string>; prefer?: 'deep'; resume?: string; log: { kind: string; number: number } }
 
 /** An Agent whose structured runs answer with `reply()`, streaming runs emit `Hi` then Done, and ticket runs answer with `ticket()` (default: no ticket account). */
 export const fakeAgent = (

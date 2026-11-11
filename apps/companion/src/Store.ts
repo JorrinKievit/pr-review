@@ -1,4 +1,4 @@
-import { AgentError, AskTarget, ChatTurn, DecisionState, DecisionStates, Draft, FileStat, GitError, GitHubError, RepoNotConfigured, Rereview, SortResult, StackOverview } from '@pr-review/domain'
+import { AgentError, AskTarget, ChatTurn, DecisionOpinion, DecisionState, DecisionStates, Draft, FileStat, FindingStates, GitError, GitHubError, PrOpinion, RepoNotConfigured, Rereview, SortResult, StackOpinion, StackOverview } from '@pr-review/domain'
 import { Context, Effect, Exit, Layer, Schema } from 'effect'
 import { KeyValueStore, Persistable, Persistence } from 'effect/persistence'
 import { NodeServices } from '@effect/platform-node'
@@ -14,8 +14,12 @@ const Drafts = Schema.Array(Draft)
 /** The verdicts on the head last worked on, with each decision's files, so a push can carry them over. */
 export const LastVerdicts = Schema.Struct({
   headSha: Schema.String,
+  mergeBase: Schema.optionalKey(Schema.String),
   decisions: Schema.Array(Schema.Struct({ id: Schema.String, paths: Schema.Array(Schema.String), state: DecisionState })),
 })
+
+/** The last opinion that finished on a PR, so a push can carry it for decisions whose change is the same. */
+export const LastOpinion = Schema.Struct({ headSha: Schema.String, mergeBase: Schema.optionalKey(Schema.String), opinion: PrOpinion })
 
 /** The file store names each entry after its key, so keys are hashed to stay under the 255-byte filename limit. */
 const digest = (key: string) => createHash('sha256').update(key).digest('hex')
@@ -28,6 +32,18 @@ export class SortKey extends Persistable.Class<{ payload: { host: string; owner:
   error: errors,
 }) {}
 
+export class OpinionKey extends Persistable.Class<{ payload: { host: string; owner: string; repo: string; number: number; headSha: string } }>()('OpinionKey', {
+  primaryKey: (k) => digest(`${k.host}/${k.owner}/${k.repo}#${k.number}@${k.headSha}`),
+  success: PrOpinion,
+  error: errors,
+}) {}
+
+export class DeeperKey extends Persistable.Class<{ payload: { host: string; owner: string; repo: string; number: number; headSha: string; decisionId: string } }>()('DeeperKey', {
+  primaryKey: (k) => digest(`${k.host}/${k.owner}/${k.repo}#${k.number}@${k.headSha} deeper ${k.decisionId}`),
+  success: DecisionOpinion,
+  error: errors,
+}) {}
+
 export type OverviewEntry = { readonly number: number; readonly headSha: string; readonly sort: SortResult; readonly files: ReadonlyArray<FileStat> }
 
 export class OverviewKey extends Persistable.Class<{
@@ -35,6 +51,14 @@ export class OverviewKey extends Persistable.Class<{
 }>()('OverviewKey', {
   primaryKey: (k) => digest(`${k.host}/${k.owner}/${k.repo} stack ${k.entries[0]?.number}@${k.entries.at(-1)?.headSha}`),
   success: StackOverview,
+  error: errors,
+}) {}
+
+export class StackOpinionKey extends Persistable.Class<{
+  payload: { host: string; owner: string; repo: string; heads: ReadonlyArray<{ number: number; headSha: string }> }
+}>()('StackOpinionKey', {
+  primaryKey: (k) => digest(`${k.host}/${k.owner}/${k.repo} stack opinion ${k.heads.map((h) => `${h.number}@${h.headSha}`).join(' ')}`),
+  success: StackOpinion,
   error: errors,
 }) {}
 
@@ -50,6 +74,23 @@ export const cacheOptions = {
   inMemoryTTL: (exit: Exit.Exit<unknown, unknown>) => (Exit.isSuccess(exit) ? '30 days' : 0),
   inMemoryCapacity: 200,
 } as const
+
+/** Reads what a `PersistedCache` with this store id holds, without running anything; a stored failure counts as nothing. */
+export const peek = Effect.fnUntraced(function* (storeId: string) {
+  const store = yield* (yield* Persistence.Persistence).make({ storeId, timeToLive: cacheOptions.timeToLive })
+  return <A extends Schema.Constraint, E extends Schema.Constraint>(key: Persistable.Persistable<A, E>) =>
+    store.get(key).pipe(
+      Effect.catchTag('SchemaError', () => Effect.undefined),
+      Effect.orDie,
+      Effect.map((exit): A['Type'] | undefined => (exit && Exit.isSuccess(exit) ? exit.value : undefined)),
+    )
+})
+
+/** Writes a success where a `PersistedCache` with this store id reads it. Invalidate the cache's key first: it keeps hits in memory too. */
+export const poke = Effect.fnUntraced(function* (storeId: string) {
+  const store = yield* (yield* Persistence.Persistence).make({ storeId, timeToLive: cacheOptions.timeToLive })
+  return <A extends Schema.Constraint, E extends Schema.Constraint>(key: Persistable.Persistable<A, E>, value: A['Type']) => Effect.orDie(store.set(key, Exit.succeed(value)))
+})
 
 /** A broken store must not hide the result: storage failures become defects. */
 type StoreFailure = Persistence.PersistenceError | Schema.SchemaError
@@ -67,8 +108,12 @@ export class Store extends Context.Service<
     readonly drafts: KeyValueStore.SchemaStore<typeof Drafts>
     /** Per PR (not per head): see LastVerdicts. */
     readonly lastVerdicts: KeyValueStore.SchemaStore<typeof LastVerdicts>
+    /** Per PR (not per head): see LastOpinion. */
+    readonly lastOpinion: KeyValueStore.SchemaStore<typeof LastOpinion>
     /** Per head: what changed since an earlier verdict, set when the verdicts are carried. */
     readonly rereview: KeyValueStore.SchemaStore<typeof Rereview>
+    /** Per head: what the reviewer did with each finding. */
+    readonly findings: KeyValueStore.SchemaStore<typeof FindingStates>
     /** Page state between visits, opaque to the companion. */
     readonly remembered: KeyValueStore.SchemaStore<typeof Schema.String>
   }
@@ -85,8 +130,10 @@ export class Store extends Context.Service<
             chats: KeyValueStore.toSchemaStore(KeyValueStore.prefix(store, 'conversations/'), Chats),
             drafts: KeyValueStore.toSchemaStore(KeyValueStore.prefix(store, 'drafts/'), Drafts),
             lastVerdicts: KeyValueStore.toSchemaStore(KeyValueStore.prefix(store, 'last-verdicts/'), LastVerdicts),
+            lastOpinion: KeyValueStore.toSchemaStore(KeyValueStore.prefix(store, 'last-opinion/'), LastOpinion),
             rereview: KeyValueStore.toSchemaStore(KeyValueStore.prefix(store, 'rereview/'), Rereview),
             remembered: KeyValueStore.toSchemaStore(KeyValueStore.prefix(store, 'remembered/'), Schema.String),
+            findings: KeyValueStore.toSchemaStore(KeyValueStore.prefix(store, 'findings/'), FindingStates),
           })
         }),
       ),

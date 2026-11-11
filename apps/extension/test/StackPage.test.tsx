@@ -1,5 +1,5 @@
 import { RegistryProvider } from '@effect/atom-react'
-import { type Decision, type Draft, GitError, type PrView, type SortResult, type StackEntry, type StackEvent } from '@pr-review/domain'
+import { type Decision, type Draft, type Finding, GitError, type PrOpinion, type PrView, type SortResult, type StackEntry, type StackEvent, type StackOpinionEvent } from '@pr-review/domain'
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { Effect, Exit, Layer, Scope, Stream } from 'effect'
@@ -24,14 +24,20 @@ const view = (number: number): PrView => ({
   host: ref.host, owner: ref.owner, repo: ref.repo, baseSha: 'B', mergeBase: 'MB', defaultBranch: 'master', files: [], threads: [], checks: 'pass', stack: [], viewer: 'me',
 })
 
-const renderStack = (events: ReadonlyArray<StackEvent>, o: { getPr?: (n: number) => Effect.Effect<PrView, GitError>; drafts?: Draft[] } = {}) => {
+const renderStack = (events: ReadonlyArray<StackEvent>, o: { getPr?: (n: number) => Effect.Effect<PrView, GitError>; drafts?: Draft[]; stackOpinion?: StackOpinionEvent; cached?: boolean } = {}) => {
   const saved: unknown[] = []
+  const calls = { opinion: 0, stack: [] as boolean[] }
   const reviews: number[] = []
   const companion = fakeCompanion({
     handlers: {
       Stack: () => Stream.concat(Stream.fromIterable(events), Stream.never),
       GetPr: ({ ref }) => (o.getPr ? o.getPr(ref.number) : Effect.succeed(view(ref.number))),
       SetState: (p) => Effect.sync(() => void saved.push(p)),
+      Opinion: ({ run }) => Stream.fromEffect(Effect.sync(() => void (run && calls.opinion++))).pipe(Stream.as({ _tag: 'Idle' as const })),
+      StackOpinion: ({ run }) => {
+        calls.stack.push(run)
+        return Stream.make((calls.stack.includes(true) || o.cached) && o.stackOpinion ? o.stackOpinion : { _tag: 'Idle' as const })
+      },
       GetDrafts: () => Effect.succeed(o.drafts ?? []),
       SubmitReview: (p) => Effect.sync(() => void reviews.push(p.ref.number)),
     },
@@ -47,7 +53,7 @@ const renderStack = (events: ReadonlyArray<StackEvent>, o: { getPr?: (n: number)
       </AtomsContext.Provider>
     </RegistryProvider>,
   )
-  return { saved, reviews }
+  return { saved, reviews, calls }
 }
 
 test('the overview maps every PR bottom to top with what it does', async () => {
@@ -308,6 +314,60 @@ test('a stack item changed since its verdict says so', async () => {
     },
   ])
   const nav = await screen.findByRole('navigation', { name: 'Stack' }, { timeout: 3000 })
+  within(nav).getByText('1 decision changed since you looked')
   await userEvent.click(within(nav).getByRole('button', { name: /#2567/ }))
   expect(await screen.findByText(/You accepted this on an earlier push/, undefined, { timeout: 3000 })).toBeInTheDocument()
+})
+
+const finding = (id: string, pr: number, severity: Finding['severity'], over: Partial<Finding> = {}): Finding => ({
+  id, pr, severity, axis: 'standards', kind: 'design', title: `Title ${id}`, take: `Take ${id}`, evidence: [], alternative: null, comment: null, anchor: null, handledIn: null, decisionId: null, verified: true, ...over,
+})
+const prOpinion = (findings: Finding[]): PrOpinion => ({
+  headSha: 'h', ticket: null, ticketNote: '', stackHeads: {}, decisions: [{ decisionId: 'money', authorCase: 'c', checked: null, findings, deep: false }],
+})
+const two = (opinions: Record<number, PrOpinion> = {}) => ({
+  entries: [2567, 2568].map((n) => ({
+    pr: pr(n), status: 'done' as const, result: result([decision('money', 'architecture', 'Data model')]), error: null, state: {},
+    ...(opinions[n] ? { opinion: opinions[n] } : {}),
+  })),
+  overview: null,
+})
+
+test('Judge the stack runs only the stack opinion', async () => {
+  const { calls } = renderStack([two()], { stackOpinion: { _tag: 'Done', opinion: { heads: {}, findings: [finding('s1', 2568, 'should')] } } })
+  await userEvent.click(await screen.findByRole('button', { name: 'Judge the stack' }, { timeout: 3000 }))
+  expect(await screen.findByText('Title s1')).toBeInTheDocument()
+  expect(calls.stack).toContain(true)
+  expect(calls.opinion).toBe(0)
+})
+
+test('stack and PR findings rank together, bottom PR first within a severity', async () => {
+  renderStack([two({ 2567: prOpinion([finding('p1', 2567, 'should', { decisionId: 'money' }), finding('p0', 2567, 'ask', { decisionId: 'money' })]) })], {
+    stackOpinion: { _tag: 'Done', opinion: { heads: {}, findings: [finding('s1', 2568, 'should'), finding('s0', 2568, 'blocks')] } },
+    cached: true,
+  })
+  const titles = () => within(screen.getByRole('list', { name: "Claude's findings" })).getAllByRole('listitem').map((li) => /Title [sp]\d/.exec(li.textContent!)![0])
+  await waitFor(() => expect(titles()).toEqual(['Title s0', 'Title p1', 'Title s1', 'Title p0']), { timeout: 3000 })
+  expect(within(screen.getByRole('list', { name: 'PRs in this stack' })).getAllByText('No opinion yet')).toHaveLength(1)
+})
+
+test('dismissed PR findings stay hidden, and findings with the same id on two PRs both show', async () => {
+  const same = (pr: number) => finding('money:x', pr, 'should', { decisionId: 'money', title: `Same id on #${pr}` })
+  const data = two({ 2567: prOpinion([same(2567), finding('gone', 2567, 'ask', { decisionId: 'money' })]), 2568: prOpinion([same(2568)]) })
+  data.entries[0] = { ...data.entries[0]!, opinionStates: { gone: 'dismissed' } } as (typeof data.entries)[number]
+  renderStack([data])
+  const list = await screen.findByRole('list', { name: "Claude's findings" }, { timeout: 3000 })
+  expect(within(list).getAllByRole('listitem').map((li) => li.querySelector('b')!.textContent)).toEqual(['Same id on #2567', 'Same id on #2568'])
+})
+
+test('a stack finding opens its PR', async () => {
+  renderStack([two()], { stackOpinion: { _tag: 'Done', opinion: { heads: {}, findings: [finding('s1', 2568, 'should')] } }, cached: true })
+  await userEvent.click(await screen.findByRole('button', { name: /Title s1/ }, { timeout: 3000 }))
+  expect(await screen.findByText(/PR 2 of 2/)).toBeInTheDocument()
+})
+
+test('shows the stack opinion\'s step while it runs', async () => {
+  renderStack([{ ...two(), stackOpinion: { running: true, step: 'Reading the diff of #2568' } }])
+  expect(await screen.findByText('Judging the stack: Reading the diff of #2568', {}, { timeout: 3000 })).toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: 'Judge the stack' })).toBeNull()
 })

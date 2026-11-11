@@ -16,6 +16,12 @@ export const AgentAccount = Schema.Struct({
   /** Runs at once on this account. */
   concurrency: Schema.Number,
   enabled: Schema.Boolean,
+  /** May run the ticket session. */
+  tickets: Schema.optionalKey(Schema.Boolean),
+  /** Strongest model, used for Dig deeper. */
+  deep: Schema.optionalKey(Schema.Boolean),
+  /** Cheaper model for low-impact decisions and ticket reads. */
+  fastModel: Schema.optionalKey(Schema.String),
 })
 export type AgentAccount = typeof AgentAccount.Type
 
@@ -26,6 +32,17 @@ export type AccountStatus = typeof AccountStatus.Type
 /** Paths Claude is told are probably safe to skip, by group. */
 export const TrustRule = Schema.Struct({ group: Schema.String, patterns: Schema.Array(Schema.String) })
 export type TrustRule = typeof TrustRule.Type
+
+/** Another repo the agent may read for context, with what it is for. */
+export const RelatedRepo = Schema.Struct({ repo: Schema.String, note: Schema.String })
+export type RelatedRepo = typeof RelatedRepo.Type
+
+export const RepoSettings = Schema.Struct({
+  related: Schema.Array(RelatedRepo),
+  /** Path in that repo, read at its default branch. */
+  reviewSkill: Schema.optionalKey(Schema.String),
+})
+export type RepoSettings = typeof RepoSettings.Type
 
 export const Settings = Schema.Struct({
   /** GitHub hosts whose PR pages open in the review. Tokens come from `gh auth token --hostname <host>`. */
@@ -41,9 +58,21 @@ export const Settings = Schema.Struct({
     /** Above this many kilobytes the diff is left out and the agent reads files itself. */
     maxDiffKb: Schema.Number,
     timeoutMinutes: Schema.Number,
+    /** Whether Claude's opinion runs with the review (default automatic) or only when asked. */
+    opinions: Schema.optionalKey(Schema.Literals(['automatic', 'on-demand'])),
+    /** Under this many changed lines (rule-trusted files not counted) a PR is small; default 200. */
+    smallPrLines: Schema.optionalKey(Schema.Number),
   }),
+  /** Per-repo review settings, keyed `host/owner/repo`. */
+  repos: Schema.optionalKey(Schema.Record(Schema.String, RepoSettings)),
 })
 export type Settings = typeof Settings.Type
+
+export const repoSettings = (s: Settings, repoKey: string): RepoSettings => s.repos?.[repoKey] ?? { related: [] }
+
+export const opinionsMode = (s: Settings): 'automatic' | 'on-demand' => s.review.opinions ?? 'automatic'
+
+export const smallPrLines = (s: Settings): number => s.review.smallPrLines ?? 200
 
 /** Ready-made agents from the ACP registry. Agents without an npx package need their CLI installed. */
 export const agentPresets = [

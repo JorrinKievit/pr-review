@@ -1,6 +1,6 @@
 import { describe, expect, it } from '@effect/vitest'
 import { Schema } from 'effect'
-import { AgentSort, AskTarget, PrRef, ReviewRpcs, SortEvent, SortResult } from '../src/index.ts'
+import { AgentSort, AskTarget, defaultSettings, opinionsMode, PrRef, repoSettings, ReviewEvent, ReviewRpcs, smallPrLines, Settings, SortEvent, SortResult } from '../src/index.ts'
 
 const decision = {
   id: 'api-client',
@@ -41,7 +41,7 @@ describe('domain schemas', () => {
 
   it('ReviewRpcs lists its procedures', () => {
     expect([...ReviewRpcs.requests.keys()].sort()).toEqual(
-      ['Ask', 'Configure', 'GetChats', 'GetDescription', 'GetDrafts', 'GetFilePatch', 'GetPr', 'GetSettings', 'Health', 'PoolStatus', 'Recall', 'Remember', 'SetDrafts', 'SetState', 'Sort', 'Stack', 'SubmitReview'],
+      ['Ask', 'Configure', 'DigDeeper', 'DraftRule', 'GetChats', 'GetDescription', 'GetDrafts', 'GetFilePatch', 'GetPr', 'GetSettings', 'Health', 'Opinion', 'PoolStatus', 'Prepare', 'Recall', 'Remember', 'Review', 'SetDrafts', 'SetFindingState', 'SetState', 'Sort', 'Stack', 'StackOpinion', 'SubmitReview'],
     )
   })
 })
@@ -49,4 +49,27 @@ describe('domain schemas', () => {
 it('a cached SortResult without a summary still decodes', () => {
   const old = { headSha: 'h', decisions: [], skim: [], trusted: [], claims: [], unclaimedDecisionIds: [], lines: { decision: 0, skim: 0, trusted: 0 } }
   expect(Schema.decodeUnknownSync(SortResult)(old)).toEqual(old)
+})
+
+it('settings saved before phase 2 still decode', () => {
+  const old = JSON.parse(JSON.stringify(defaultSettings))
+  const s = Schema.decodeUnknownSync(Settings)(old)
+  expect(s).toEqual(defaultSettings)
+  expect(repoSettings(s, 'h/o/r')).toEqual({ related: [] })
+})
+
+it('settings without the 2b fields decode with automatic and 200', () => {
+  const s = Schema.decodeUnknownSync(Settings)(JSON.parse(JSON.stringify(defaultSettings)))
+  expect(opinionsMode(s)).toBe('automatic')
+  expect(smallPrLines(s)).toBe(200)
+})
+
+it('ReviewEvent round-trips', () => {
+  const preparing = { _tag: 'Preparing', phases: [{ id: 'sort', label: 'Sorting 42 files', state: 'running', workers: [{ account: 'claude', recent: ['a'] }] }] }
+  const sort = { headSha: 'h', decisions: [], skim: [], trusted: [], claims: [], unclaimedDecisionIds: [], lines: { decision: 0, skim: 0, trusted: 0 }, quick: true }
+  const done = { _tag: 'Done', sort, state: {}, opinion: null, opinionError: 'boom', findingStates: {} }
+  for (const e of [preparing, done]) {
+    const enc = Schema.encodeSync(ReviewEvent)(Schema.decodeUnknownSync(ReviewEvent)(e))
+    expect(enc).toEqual(e)
+  }
 })

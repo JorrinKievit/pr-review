@@ -4,6 +4,7 @@ import { useFocusOnMount } from '../ui/focus.ts'
 import { Streamdown } from 'streamdown'
 import { cn } from '../lib/utils.ts'
 import { Button, Spinner } from '../ui/index.tsx'
+import { RuleDialog } from './RuleDialog.tsx'
 import { CommentBox } from './CommentBox.tsx'
 import { useConversation } from './conversation.ts'
 import { useDrafts } from './drafts.ts'
@@ -170,16 +171,23 @@ export function DraftNote({ prRef, draft }: { prRef: PrRef; draft: Draft }) {
   )
 }
 
-/** A comment thread already on GitHub. */
-export function GitHubThread({ comments }: { comments: ReadonlyArray<Thread> }) {
+/** A comment thread already on GitHub. The viewer's own comments can become a rule. */
+export function GitHubThread({ prRef, viewer, comments }: { prRef: PrRef; viewer: string; comments: ReadonlyArray<Thread> }) {
+  const [ruling, setRuling] = useState<number>()
   return (
     <div className={box}>
       {comments.map((c) => (
         <div key={c.id} className="mb-1.5 last:mb-0">
-          <p className="text-sm">
+          <p className="flex items-center gap-2 text-sm">
             <span className="font-medium">{c.author}</span> <span className="text-dim">{new Date(c.createdAt).toLocaleDateString()}</span>
+            {c.author === viewer && ruling !== c.id && (
+              <button type="button" onClick={() => setRuling(c.id)} className="ml-auto text-dim hover:text-foreground">
+                Make it a rule
+              </button>
+            )}
           </p>
           <Streamdown className="text-sm text-muted-foreground">{c.body}</Streamdown>
+          {ruling === c.id && <RuleDialog prRef={prRef} text={c.body} onClose={() => setRuling(undefined)} />}
         </div>
       ))}
     </div>

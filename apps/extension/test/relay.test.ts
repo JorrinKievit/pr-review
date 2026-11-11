@@ -39,6 +39,18 @@ const setup = (o: { onSortEnd?: () => void; settings?: Settings; configured?: Se
   })
 
 describe('relay', () => {
+  it.effect('a prepare from the background reaches the companion, and without one nothing throws', () =>
+    Effect.gen(function* () {
+      const prepared: unknown[] = []
+      const companion = fakeCompanion({ handlers: { Prepare: ({ ref }) => Effect.sync(() => (prepared.push(ref), true)) } })
+      yield* Layer.build(companion.server)
+      let fire: (r: typeof ref) => void = () => {}
+      yield* Layer.build(relay(() => ({ port: companion.hub.connect(), lastError: () => undefined }), memoryHub().onConnect, Effect.succeed(undefined), undefined, { addListener: (f) => (fire = f) }))
+      fire(ref)
+      yield* flush
+      assert.deepStrictEqual(prepared, [ref])
+    }).pipe(Effect.scoped))
+
   it.effect('configures the companion with the stored settings before the first call', () =>
     Effect.gen(function* () {
       const configured: Settings[] = []
@@ -112,6 +124,64 @@ describe('relay', () => {
       const again = yield* page
       yield* again.client.Health()
       assert.strictEqual(native.opened, 2)
+    }).pipe(Effect.scoped))
+
+  /** A relay with prepares; `started` is what the companion answers to Prepare. */
+  const preparing = (started = true) =>
+    Effect.gen(function* () {
+      const companion = fakeCompanion({ handlers: { Prepare: () => Effect.succeed(started) } })
+      yield* Layer.build(companion.server)
+      const native = { closed: 0 }
+      companion.hub.onConnect.addListener((port) => port.onDisconnect.addListener(() => native.closed++))
+      let fire: (r: typeof ref) => void = () => {}
+      const pages = memoryHub()
+      yield* Layer.build(relay(() => ({ port: companion.hub.connect(), lastError: () => undefined }), pages.onConnect, Effect.succeed(undefined), undefined, { addListener: (f) => (fire = f) }))
+      const page = Effect.gen(function* () {
+        const scope = yield* Scope.make()
+        const client = yield* makePortClient(ReviewRpcs, Effect.sync(() => pages.connect())).pipe(Scope.provide(scope))
+        return { client, close: Scope.close(scope, Exit.void) }
+      })
+      return { native, page, fire: (r: typeof ref) => fire(r) }
+    })
+
+  it.effect('a prepare with no page closes the connection after 10 minutes, not before', () =>
+    Effect.gen(function* () {
+      const { native, fire } = yield* preparing()
+      fire(ref)
+      yield* flush
+      yield* TestClock.adjust('9 minutes')
+      yield* flush
+      assert.strictEqual(native.closed, 0)
+      yield* TestClock.adjust('1 minute')
+      yield* flush
+      assert.strictEqual(native.closed, 1)
+    }).pipe(Effect.scoped))
+
+  it.effect('a prepare made while a page is open still holds 10 minutes after that page leaves', () =>
+    Effect.gen(function* () {
+      const { native, page, fire } = yield* preparing()
+      const p = yield* page
+      yield* p.client.Health()
+      fire(ref)
+      yield* flush
+      yield* p.close
+      yield* flush
+      yield* TestClock.adjust('6 minutes')
+      yield* flush
+      assert.strictEqual(native.closed, 0)
+      yield* TestClock.adjust('4 minutes')
+      yield* flush
+      assert.strictEqual(native.closed, 1)
+    }).pipe(Effect.scoped))
+
+  it.effect('a declined prepare closes the host at the usual idle time', () =>
+    Effect.gen(function* () {
+      const { native, fire } = yield* preparing(false)
+      fire(ref)
+      yield* flush
+      yield* TestClock.adjust('5 minutes')
+      yield* flush
+      assert.strictEqual(native.closed, 1)
     }).pipe(Effect.scoped))
 
   it.effect('native disconnect surfaces CompanionUnavailable', () =>

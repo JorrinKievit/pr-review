@@ -1,32 +1,72 @@
 import { assert, describe, it } from '@effect/vitest'
-import { AgentError, type AgentSort, type Decision, type FileStat, ReviewRejected, ReviewRpcs, RepoNotConfigured, type StackEntry } from '@pr-review/domain'
+import { AgentError, type AgentOpinion, type AgentSort, type Decision, type FileStat, ReviewRejected, ReviewRpcs, RepoNotConfigured, type StackEntry } from '@pr-review/domain'
+import { NodeServices } from '@effect/platform-node'
 import { Effect, Fiber, Layer, Logger, Stream } from 'effect'
+import { writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { KeyValueStore } from 'effect/persistence'
 import { RpcTest } from 'effect/rpc'
 import { Asker } from '../src/Asker.ts'
+import { Config } from '../src/Config.ts'
+import { Git } from '../src/Git.ts'
 import { CompanionRpcs, HandlersLive, LoggedLive } from '../src/handlers.ts'
+import { Opiner } from '../src/Opiner.ts'
+import { contentIds } from '../src/opinionContext.ts'
 import { Overview } from '../src/Overview.ts'
+import { Reviewer } from '../src/Reviewer.ts'
 import { Sorter } from '../src/Sorter.ts'
+import { StackOpiner } from '../src/StackOpiner.ts'
 import { Store } from '../src/Store.ts'
+import { Tickets } from '../src/Tickets.ts'
 import { configLayer, fakeAgent, fakeGit, fakeGitHub, overviewReply, pr, ref } from './fakes.ts'
+import { git, makeRemote, tmp } from './helpers.ts'
 import { TestClock } from 'effect/testing'
 
 const entry = (number: number, baseRef: string, headRef: string): StackEntry => ({ number, title: `#${number}`, baseRef, headRef, headSha: `sha${number}` })
 const files = [{ path: 'src/a.ts', additions: 3, deletions: 1 }]
 const sortReply = { decisions: [], skim: [], claims: [] }
+const d1: Decision = { id: 'd1', title: 'd1', lens: 'architecture', reason: 'data-model', theme: 't', note: 'n', existing: null, authorWhy: null, files: [{ path: 'src/a.ts', ranges: [] }] }
+const opinionReply: AgentOpinion = {
+  decisions: [
+    {
+      decisionId: 'd1',
+      authorCase: 'c',
+      checked: null,
+      findings: [
+        {
+          severity: 'should',
+          axis: 'standards',
+          kind: 'design',
+          title: 'f',
+          take: 't',
+          evidence: [{ ref: 'docs', path: 'react', line: 0, quote: 'effects' }],
+          alternative: null,
+          comment: null,
+          anchor: null,
+          handledIn: null,
+        },
+      ],
+    },
+  ],
+}
+const opinionCalls = (calls: ReadonlyArray<{ log: { kind: string } }>) => calls.filter((c) => c.log.kind === 'opinion').length
 
 const setup = (
-  o: { delay?: number; overviewFails?: string; github?: Parameters<typeof fakeGitHub>[0]; sorts?: ReadonlyArray<AgentSort>; files?: FileStat[]; diff?: NonNullable<Parameters<typeof fakeGit>[0]>['diff']; git?: ReturnType<typeof fakeGit> } = {},
+  o: { delay?: number; overviewFails?: string; github?: Parameters<typeof fakeGitHub>[0]; sorts?: ReadonlyArray<AgentSort>; files?: FileStat[]; diff?: NonNullable<Parameters<typeof fakeGit>[0]>['diff']; git?: ReturnType<typeof fakeGit>; opinions?: ReadonlyArray<AgentOpinion> } = {},
 ) => {
   let sorted = 0
+  let opined = 0
   const agent = fakeAgent((call) =>
     call.log.kind === 'overview' && o.overviewFails
       ? Effect.fail(new AgentError({ message: o.overviewFails }))
-      : Effect.as(o.delay ? Effect.sleep(o.delay) : Effect.void, call.log.kind === 'overview' ? overviewReply : (o.sorts?.[sorted++] ?? sortReply)),
+      : Effect.as(
+          o.delay ? Effect.sleep(o.delay) : Effect.void,
+          call.log.kind === 'overview' ? overviewReply : call.log.kind === 'stack-opinion' ? { findings: [] } : call.log.kind === 'opinion' || call.log.kind === 'deeper' ? (o.opinions?.[opined++] ?? opinionReply) : (o.sorts?.[sorted++] ?? sortReply),
+        ),
   )
   const deps = Layer.mergeAll(agent.layer, (o.git ?? fakeGit({ files: o.files ?? files, diff: o.diff ?? 'd' })).layer, fakeGitHub({ listOpenPrs: () => Effect.succeed([entry(7, 'master', 'feat')]), ...o.github }), configLayer())
   const store = Store.layerWith(KeyValueStore.layerMemory)
-  const services = Layer.mergeAll(Sorter.layer, Asker.layer, Overview.layer).pipe(Layer.provideMerge(store), Layer.provideMerge(deps))
+  const services = Layer.mergeAll(StackOpiner.layer, Asker.layer, Overview.layer, Reviewer.layer).pipe(Layer.provideMerge(Opiner.layer), Layer.provideMerge(Layer.mergeAll(Sorter.layer, Tickets.layer)), Layer.provideMerge(store), Layer.provideMerge(deps))
   const layer = HandlersLive.pipe(Layer.provide(services))
   // Built in the test's scope, like the companion's process scope: the handlers outlive each client call.
   const client = Effect.flatMap(Layer.build(Layer.merge(layer, LoggedLive)), (ctx) => RpcTest.makeClient(CompanionRpcs).pipe(Effect.provideContext(ctx)))
@@ -107,12 +147,32 @@ describe('handlers', () => {
       const { agent, client } = setup({ github: { listOpenPrs: () => Effect.succeed([entry(8, 'feat', 'feat2'), entry(7, 'master', 'feat')]) } })
       const c = yield* client
       const events = yield* Stream.runCollect(c.Stack({ ref: { ...ref, number: 8 } }))
-      assert.deepStrictEqual(agent.calls.map((x) => x.log.kind), ['sort', 'sort', 'overview'])
+      assert.deepStrictEqual(agent.calls.map((x) => x.log.kind), ['sort', 'sort', 'overview', 'stack-opinion'])
       assert.deepStrictEqual(agent.calls.slice(0, 2).map((x) => x.log.number), [7, 8])
       assert.deepStrictEqual(events[0]!.entries.map((e) => e.status), ['queued', 'queued'])
       const last = events.at(-1)!
       assert.deepStrictEqual(last.entries.map((e) => [e.pr.number, e.status]), [[7, 'done'], [8, 'done']])
       assert.deepStrictEqual(last.overview, overviewReply)
+    }).pipe(Effect.scoped))
+
+  it.live('stack opinion starts after every PR is sorted, once', () =>
+    Effect.gen(function* () {
+      const { agent, client } = setup({ github: { listOpenPrs: () => Effect.succeed([entry(8, 'feat', 'feat2'), entry(7, 'master', 'feat')]) } })
+      const c = yield* client
+      const first = yield* Stream.runCollect(c.Stack({ ref: { ...ref, number: 8 } }))
+      assert.deepStrictEqual(first.at(-1)!.stackOpinion, { running: false })
+      assert.isTrue(first.some((e) => e.stackOpinion?.running))
+      yield* Stream.runCollect(c.Stack({ ref: { ...ref, number: 8 } }))
+      assert.strictEqual(agent.calls.filter((x) => x.log.kind === 'stack-opinion').length, 1)
+      const kinds = agent.calls.map((x) => x.log.kind)
+      assert.isTrue(kinds.lastIndexOf('sort') < kinds.indexOf('stack-opinion'))
+    }).pipe(Effect.scoped))
+
+  it.live('no PR opinion runs from the stack view', () =>
+    Effect.gen(function* () {
+      const { agent, client } = setup()
+      yield* Stream.runCollect((yield* client).Stack({ ref }))
+      assert.strictEqual(opinionCalls(agent.calls), 0)
     }).pipe(Effect.scoped))
 
   it.live('Stack ends with why the overview failed, so the page stops waiting for it', () =>
@@ -218,7 +278,7 @@ describe('handlers', () => {
       const c = yield* setup({
         files: [{ path: 'src/a.ts', additions: 1, deletions: 0 }, { path: 'src/b.ts', additions: 1, deletions: 0 }, { path: 'src/c.ts', additions: 1, deletions: 0 }],
         // Between the two heads only b.ts changed.
-        diff: (from, to, paths) => (from === 'HEAD1' && to === 'HEAD2' ? (paths.includes('src/b.ts') ? 'changed' : '') : 'd'),
+        diff: (_from, to, paths) => (to === 'HEAD2' && paths.includes('src/b.ts') ? 'changed' : 'd'),
         sorts: [
           { decisions: [decision('a', 'src/a.ts'), decision('b', 'src/b.ts')], skim: [{ area: 'Wiring', summary: 's', files: ['src/c.ts'] }], claims: [] },
           // The new sort names a's decision differently; it still covers the same file.
@@ -237,6 +297,82 @@ describe('handlers', () => {
       yield* c.SetState({ ref, headSha: 'HEAD2', decisionId: 'skim:Wiring', state: null })
       const again = (yield* Stream.runCollect(c.Sort({ ref, headSha: 'HEAD2' }))).at(-1)!
       assert.deepStrictEqual(again._tag === 'Done' ? again.rereview : undefined, { b: { since: 'HEAD1', was: 'pushed-back' } })
+    }).pipe(Effect.scoped))
+
+  it.effect('an opinion carries to a new head for decisions whose change is the same', () =>
+    Effect.gen(function* () {
+      const decision = (id: string, path: string): Decision => ({ id, title: id, lens: 'architecture', reason: 'data-model', theme: 't', note: 'n', existing: null, authorWhy: null, files: [{ path, ranges: [] }] })
+      const [base] = opinionReply.decisions
+      const reply: AgentOpinion = { decisions: ['a', 'b'].map((id) => ({ ...base!, decisionId: id, findings: [{ ...base!.findings[0]!, title: id, anchor: { path: 'src/a.ts', line: 2 } }] })) }
+      const { agent, client } = setup({
+        files: [{ path: 'src/a.ts', additions: 1, deletions: 0 }, { path: 'src/b.ts', additions: 1, deletions: 0 }],
+        // Between the two heads only b.ts changed.
+        diff: (_from, to, paths) => (to === 'HEAD2' && paths.includes('src/b.ts') ? 'changed' : 'diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1,3 @@\n+x'),
+        sorts: [
+          { decisions: [decision('a', 'src/a.ts'), decision('b', 'src/b.ts')], skim: [], claims: [] },
+          { decisions: [decision('a-renamed', 'src/a.ts'), decision('b', 'src/b.ts')], skim: [], claims: [] },
+        ],
+        opinions: [reply],
+      })
+      const c = yield* client
+      const last = <A>(s: Stream.Stream<A, unknown>) => Effect.map(Stream.runCollect(s), (e) => e.at(-1)!)
+      yield* Stream.runCollect(c.Sort({ ref, headSha: 'HEAD1' }))
+      const first = yield* last(c.Opinion({ ref, headSha: 'HEAD1', run: true }))
+      const aId = first._tag === 'Done' ? first.opinion.decisions[0]!.findings[0]!.id : ''
+      assert.deepStrictEqual(first._tag === 'Done' && first.opinion.decisions[0]!.findings[0]!.anchor, { path: 'src/a.ts', line: 2 })
+      yield* c.SetFindingState({ ref, headSha: 'HEAD1', findingId: aId, state: 'dismissed' })
+      // Nothing to match against until the new head is sorted.
+      assert.deepStrictEqual(tags(yield* Stream.runCollect(c.Opinion({ ref, headSha: 'HEAD2', run: false }))), ['Idle'])
+      yield* Stream.runCollect(c.Sort({ ref, headSha: 'HEAD2' }))
+      const carried = yield* last(c.Opinion({ ref, headSha: 'HEAD2', run: false }))
+      assert.isTrue(carried._tag === 'Done')
+      if (carried._tag !== 'Done') return
+      assert.strictEqual(carried.opinion.carriedFrom, 'HEAD1')
+      // b's own change differs, so only a's opinion carries, under the new decision id, with its finding state.
+      assert.deepStrictEqual(carried.opinion.decisions.map((d) => [d.decisionId, d.findings.map((f) => [f.id, f.decisionId])]), [['a-renamed', [[aId, 'a-renamed']]]])
+      assert.deepStrictEqual(carried.states, { [aId]: 'dismissed' })
+      // Its old line may have moved, so it offers its comment to copy instead of a draft.
+      assert.isNull(carried.opinion.decisions[0]!.findings[0]!.anchor)
+      assert.strictEqual(opinionCalls(agent.calls), 1)
+      // Running replaces it.
+      const ran = yield* last(c.Opinion({ ref, headSha: 'HEAD2', run: true }))
+      assert.strictEqual(opinionCalls(agent.calls), 2)
+      assert.notProperty(ran._tag === 'Done' ? ran.opinion : {}, 'carriedFrom')
+      const after = yield* last(c.Opinion({ ref, headSha: 'HEAD2', run: false }))
+      assert.isTrue(after._tag === 'Done' && !('carriedFrom' in after.opinion))
+    }).pipe(Effect.scoped))
+
+  it.live('a rebase that only moved the base carries the verdict', () =>
+    Effect.gen(function* () {
+      const remote = makeRemote()
+      const lines = (first: string) => `${first}\n${Array.from({ length: 20 }, (_, i) => `line ${i}`).join('\n')}\n`
+      const commit = (msg: string) => (git(remote, 'add', '.'), git(remote, 'commit', '-qm', msg))
+      git(remote, 'checkout', '-q', 'master')
+      writeFileSync(join(remote, 'm.txt'), lines('top'))
+      commit('m')
+      git(remote, 'checkout', '-q', 'feat')
+      git(remote, 'rebase', '-q', 'master')
+      writeFileSync(join(remote, 'm.txt'), lines('top').replace('line 15', 'changed'))
+      commit('feat edits m')
+      git(remote, 'update-ref', 'refs/pull/7/head', 'feat')
+      const decision = (id: string, path: string): Decision => ({ id, title: id, lens: 'architecture', reason: 'data-model', theme: 't', note: 'n', existing: null, authorWhy: null, files: [{ path, ranges: [] }] })
+      const reply = { decisions: [decision('a', 'm.txt')], skim: [], claims: [] }
+      const realGit = Git.layer.pipe(Layer.provide(Config.layerTest({ cacheRoot: tmp(), remotes: { 'h/o/r': `file://${remote}` } })), Layer.provideMerge(NodeServices.layer))
+      const c = yield* setup({ sorts: [reply, reply], git: { layer: realGit } as ReturnType<typeof fakeGit> }).client
+      const head1 = git(remote, 'rev-parse', 'feat')
+      yield* Stream.runCollect(c.Sort({ ref, headSha: head1 }))
+      yield* c.SetState({ ref, headSha: head1, decisionId: 'a', state: 'accepted' })
+      git(remote, 'checkout', '-q', 'master')
+      writeFileSync(join(remote, 'm.txt'), lines('top').replace('top', 'new top\nsecond top'))
+      commit('base moves')
+      git(remote, 'checkout', '-q', 'feat')
+      git(remote, 'rebase', '-q', 'master')
+      git(remote, 'update-ref', 'refs/pull/7/head', 'feat')
+      const head2 = git(remote, 'rev-parse', 'feat')
+      assert.notStrictEqual(head2, head1)
+      const done = (yield* Stream.runCollect(c.Sort({ ref, headSha: head2 }))).at(-1)!
+      assert.strictEqual(done._tag === 'Done' ? done.state.a : undefined, 'accepted')
+      assert.deepStrictEqual(done._tag === 'Done' ? done.rereview : undefined, {})
     }).pipe(Effect.scoped))
 
   it.effect('GetPr reads the PR while the open PRs load, and later shows the open PRs as last seen', () =>
@@ -281,4 +417,195 @@ describe('handlers', () => {
       const other = (yield* Stream.runCollect(c.Sort({ ref, headSha: 'OTHER' }))).at(-1)!
       assert.deepStrictEqual(other._tag === 'Done' && other.state, {})
     }).pipe(Effect.scoped))
+
+  it.live('Review streams Preparing then Done', () =>
+    Effect.gen(function* () {
+      const { agent, client } = setup({ delay: 100, files: [{ path: 'src/a.ts', additions: 300, deletions: 0 }], sorts: [{ decisions: [d1], skim: [], claims: [] }] })
+      const c = yield* client
+      const events = yield* Stream.runCollect(c.Review({ ref, headSha: 'HEAD1' }))
+      const t = tags(events)
+      assert.deepStrictEqual([...new Set(t)], ['Preparing', 'Done'])
+      const preparing = events.flatMap((e) => (e._tag === 'Preparing' ? [e.phases] : []))
+      assert.isTrue(preparing.some((ps) => ps.some((p) => p.id === 'sort' && p.label === 'Sorting 1 file' && p.state === 'running')))
+      assert.isTrue(preparing.some((ps) => ps.some((p) => p.id === 'opinion' && p.label === 'Judging 1 decision')))
+      // Deduplicated: no two snapshots in a row are the same.
+      assert.isTrue(preparing.every((ps, i) => i === 0 || JSON.stringify(ps) !== JSON.stringify(preparing[i - 1])))
+      const done = events.at(-1)!
+      assert.strictEqual(done._tag, 'Done')
+      if (done._tag !== 'Done') return
+      assert.deepStrictEqual(done.sort.decisions.map((d) => d.id), ['d1'])
+      assert.deepStrictEqual(done.opinion?.decisions.map((d) => d.decisionId), ['d1'])
+      assert.deepStrictEqual(done.findingStates, {})
+      assert.deepStrictEqual(done.state, {})
+      assert.deepStrictEqual(agent.calls.map((x) => x.log.kind), ['sort', 'opinion'])
+      // A fully prepared head answers at once.
+      assert.deepStrictEqual(tags(yield* Stream.runCollect(c.Review({ ref, headSha: 'HEAD1' }))), ['Done'])
+    }).pipe(Effect.scoped))
+
+  it.live('Prepare ignores PRs the viewer is not asked to review', () =>
+    Effect.gen(function* () {
+      const other = setup({ delay: 100, github: { requestedReviewers: () => Effect.succeed(['ann']) } })
+      assert.isFalse(yield* (yield* other.client).Prepare({ ref }))
+      yield* Effect.sleep('30 millis')
+      assert.strictEqual(other.agent.calls.length, 0)
+
+      const asked = setup({ delay: 100, github: { requestedReviewers: () => Effect.succeed(['ann', 'Me']) } })
+      assert.isTrue(yield* (yield* asked.client).Prepare({ ref }))
+      yield* Effect.sleep('30 millis')
+      assert.deepStrictEqual(asked.agent.calls.map((x) => x.log.kind), ['sort'])
+    }).pipe(Effect.scoped))
+
+  it.effect('Opinion with run false and nothing cached is Idle', () =>
+    Effect.gen(function* () {
+      const { agent, client } = setup()
+      const c = yield* client
+      assert.deepStrictEqual(tags(yield* Stream.runCollect(c.Opinion({ ref, headSha: 'HEAD1', run: false }))), ['Idle'])
+      assert.strictEqual(agent.calls.length, 0)
+    }).pipe(Effect.scoped))
+
+  it.live('Opinion with run true streams Running then Done with saved finding states', () =>
+    Effect.gen(function* () {
+      const { agent, client } = setup({ delay: 100, sorts: [{ decisions: [d1], skim: [], claims: [] }] })
+      const c = yield* client
+      const id = contentIds('d1:', ['f\nt'])[0]!
+      yield* c.SetFindingState({ ref, headSha: 'HEAD1', findingId: id, state: 'posted' })
+      const events = yield* Stream.runCollect(c.Opinion({ ref, headSha: 'HEAD1', run: true }))
+      assert.deepStrictEqual([...new Set(tags(events))], ['Running', 'Done'])
+      const done = events.at(-1)!
+      assert.deepStrictEqual(done._tag === 'Done' && [done.opinion.decisions[0]!.findings[0]!.id, done.states], [id, { [id]: 'posted' }])
+      // Cached now: a page opening later gets it without asking for a run.
+      assert.deepStrictEqual(tags(yield* Stream.runCollect(c.Opinion({ ref, headSha: 'HEAD1', run: false }))), ['Done'])
+      assert.strictEqual(opinionCalls(agent.calls), 1)
+    }).pipe(Effect.scoped))
+
+  it.live('DigDeeper streams Running then Done', () =>
+    Effect.gen(function* () {
+      const { agent, client } = setup({ delay: 100, sorts: [{ decisions: [d1], skim: [], claims: [] }] })
+      const c = yield* client
+      const events = yield* Stream.runCollect(c.DigDeeper({ ref, headSha: 'HEAD1', decisionId: 'd1' }))
+      assert.deepStrictEqual([...new Set(tags(events))], ['Running', 'Done'])
+      const done = events.at(-1)!
+      assert.deepInclude(done._tag === 'Done' && done.opinion, { decisionId: 'd1', deep: true })
+      assert.strictEqual(agent.calls.filter((x) => x.log.kind === 'deeper').length, 1)
+    }).pipe(Effect.scoped))
+
+  it.effect('Opinion run true re-runs when a PR above has a new head', () =>
+    Effect.gen(function* () {
+      let above = 'sha8'
+      const { agent, client } = setup({ sorts: [{ decisions: [d1], skim: [], claims: [] }], github: { listOpenPrs: () => Effect.sync(() => [entry(7, 'master', 'feat'), { ...entry(8, 'feat', 'feat2'), headSha: above }]) } })
+      const c = yield* client
+      const run = Stream.runCollect(c.Opinion({ ref, headSha: 'HEAD1', run: true }))
+      yield* run
+      yield* run
+      assert.strictEqual(opinionCalls(agent.calls), 1)
+      above = 'sha8-new'
+      const done = (yield* run).at(-1)!
+      assert.strictEqual(opinionCalls(agent.calls), 2)
+      assert.deepStrictEqual(done._tag === 'Done' && done.opinion.stackHeads, { 8: 'sha8-new' })
+    }).pipe(Effect.scoped))
+
+  it.effect('a re-run with different findings does not inherit a dismissed state', () =>
+    Effect.gen(function* () {
+      let above = 'sha8'
+      const [first] = opinionReply.decisions
+      const other: AgentOpinion = { decisions: [{ ...first!, findings: [{ ...first!.findings[0]!, title: 'other', take: 'another' }] }] }
+      const { client } = setup({
+        sorts: [{ decisions: [d1], skim: [], claims: [] }],
+        opinions: [opinionReply, other],
+        github: { listOpenPrs: () => Effect.sync(() => [entry(7, 'master', 'feat'), { ...entry(8, 'feat', 'feat2'), headSha: above }]) },
+      })
+      const c = yield* client
+      const run = Effect.map(Stream.runCollect(c.Opinion({ ref, headSha: 'HEAD1', run: true })), (e) => e.at(-1)!)
+      const before = yield* run
+      const dismissed = before._tag === 'Done' ? before.opinion.decisions[0]!.findings[0]!.id : ''
+      yield* c.SetFindingState({ ref, headSha: 'HEAD1', findingId: dismissed, state: 'dismissed' })
+      above = 'sha8-new'
+      const after = yield* run
+      assert.isTrue(after._tag === 'Done')
+      const fresh = after._tag === 'Done' ? after.opinion.decisions[0]!.findings[0]!.id : ''
+      assert.notStrictEqual(fresh, dismissed)
+      assert.isUndefined(after._tag === 'Done' ? after.states[fresh] : 'not done')
+    }).pipe(Effect.scoped))
+
+  it.effect('SetFindingState saves and clears', () =>
+    Effect.gen(function* () {
+      const c = yield* setup({ sorts: [{ decisions: [d1], skim: [], claims: [] }] }).client
+      yield* Stream.runCollect(c.Opinion({ ref, headSha: 'HEAD1', run: true }))
+      yield* c.SetFindingState({ ref, headSha: 'HEAD1', findingId: 'a', state: 'posted' })
+      yield* c.SetFindingState({ ref, headSha: 'HEAD1', findingId: 'b', state: 'dismissed' })
+      yield* c.SetFindingState({ ref, headSha: 'HEAD1', findingId: 'b', state: null })
+      const done = (yield* Stream.runCollect(c.Opinion({ ref, headSha: 'HEAD1', run: false }))).at(-1)!
+      assert.deepStrictEqual(done._tag === 'Done' && done.states, { a: 'posted' })
+    }).pipe(Effect.scoped))
+
+  it.effect('Stack entries carry cached PR opinions', () =>
+    Effect.gen(function* () {
+      const c = yield* setup({ sorts: [{ decisions: [d1], skim: [], claims: [] }], github: { listOpenPrs: () => Effect.succeed([entry(7, 'master', 'feat'), entry(8, 'feat', 'feat2')]) } }).client
+      yield* Stream.runCollect(c.Opinion({ ref, headSha: 'sha7', run: true }))
+      const last = (yield* Stream.runCollect(c.Stack({ ref }))).at(-1)!
+      const id = contentIds('d1:', ['f\nt'])[0]!
+      assert.deepStrictEqual(last.entries.map((e) => e.opinion?.decisions[0]?.findings[0]?.id), [id, undefined])
+      assert.notProperty(last.entries[1]!, 'opinion')
+      yield* c.SetFindingState({ ref, headSha: 'sha7', findingId: id, state: 'dismissed' })
+      const again = (yield* Stream.runCollect(c.Stack({ ref }))).at(-1)!
+      assert.deepStrictEqual(again.entries[0]!.opinionStates, { [id]: 'dismissed' })
+    }).pipe(Effect.scoped))
+
+  it.effect('StackOpinion run false is Idle', () =>
+    Effect.gen(function* () {
+      const { agent, client } = setup()
+      const c = yield* client
+      assert.deepStrictEqual(tags(yield* Stream.runCollect(c.StackOpinion({ ref, run: false }))), ['Idle'])
+      assert.strictEqual(agent.calls.length, 0)
+    }).pipe(Effect.scoped))
+
+  it.effect('StackOpinion run true answers Done, and is cached after', () =>
+    Effect.gen(function* () {
+      const { agent, client } = setup()
+      const c = yield* client
+      const done = (yield* Stream.runCollect(c.StackOpinion({ ref, run: true }))).at(-1)!
+      assert.deepStrictEqual(done._tag === 'Done' && done.opinion, { heads: { 7: 'sha7' }, findings: [] })
+      assert.deepStrictEqual(tags(yield* Stream.runCollect(c.StackOpinion({ ref, run: false }))), ['Done'])
+      assert.deepStrictEqual(agent.calls.map((x) => x.log.kind), ['stack-opinion'])
+    }).pipe(Effect.scoped))
+
+  const ruleClient = (reply: { path: string; rule: string }, fg = fakeGit({ rules: ['AGENTS.md'], show: { 'origin/master:AGENTS.md': '# Rules\n\n- one\n' } })) => {
+    const agent = fakeAgent(() => Effect.succeed(reply))
+    const deps = Layer.mergeAll(agent.layer, fg.layer, fakeGitHub(), configLayer())
+    const services = Layer.mergeAll(StackOpiner.layer, Asker.layer, Overview.layer, Reviewer.layer).pipe(Layer.provideMerge(Opiner.layer), Layer.provideMerge(Layer.mergeAll(Sorter.layer, Tickets.layer)), Layer.provideMerge(Store.layerWith(KeyValueStore.layerMemory)), Layer.provideMerge(deps))
+    const client = Effect.flatMap(Layer.build(Layer.merge(HandlersLive.pipe(Layer.provide(services)), LoggedLive)), (ctx) => RpcTest.makeClient(CompanionRpcs).pipe(Effect.provideContext(ctx)))
+    return { agent, client }
+  }
+
+  it.effect('DraftRule drafts a patch for a file in the guidance', () =>
+    Effect.gen(function* () {
+      const { agent, client } = ruleClient({ path: 'AGENTS.md', rule: '- Name timeouts. Always.\n' })
+      const draft = yield* Effect.flatMap(client, (c) => c.DraftRule({ ref, text: 'name your timeouts' }))
+      assert.strictEqual(draft.path, 'AGENTS.md')
+      assert.strictEqual(draft.old, '# Rules\n\n- one\n')
+      assert.include(draft.patch, '+- Name timeouts. Always.')
+      assert.strictEqual(draft.branch, 'rules/name-timeouts-always')
+      assert.strictEqual(draft.title, 'Review rule: Name timeouts.')
+      assert.include(agent.calls[0]!.prompt, 'AGENTS.md')
+      assert.include(agent.calls[0]!.prompt, 'name your timeouts')
+    }),
+  )
+
+  it.effect('DraftRule rejects a path outside the guidance', () =>
+    Effect.gen(function* () {
+      const { client } = ruleClient({ path: 'src/secret.ts', rule: '- x' })
+      const err = yield* Effect.flip(Effect.flatMap(client, (c) => c.DraftRule({ ref, text: 'x' })))
+      assert.strictEqual(err._tag, 'AgentError')
+      assert.include((err as AgentError).message, 'outside the review guidance: src/secret.ts')
+    }),
+  )
+
+  it.effect('DraftRule creates the file when it is not at the default branch', () =>
+    Effect.gen(function* () {
+      const { client } = ruleClient({ path: 'AGENTS.md', rule: '- x' }, fakeGit({ rules: [], show: {} }))
+      const draft = yield* Effect.flatMap(client, (c) => c.DraftRule({ ref, text: 'x' }))
+      assert.strictEqual(draft.old, null)
+      assert.include(draft.patch, '--- /dev/null')
+    }),
+  )
 })

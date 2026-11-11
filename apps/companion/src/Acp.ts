@@ -4,8 +4,9 @@ import { Context, Effect, Fiber, Layer, Queue, type Scope, Stream } from 'effect
 import { spawn } from 'node:child_process'
 import { homedir } from 'node:os'
 import { Readable, Writable } from 'node:stream'
-import { safeGitCommand } from './gitOnly.ts'
+import { safeGhCommand, safeGitCommand } from './gitOnly.ts'
 import { loginPath } from './shellPath.ts'
+import { ticketPermission } from './permissions.ts'
 import { describeTool } from './steps.ts'
 
 export type AcpUpdate = { readonly _tag: 'Text'; readonly delta: string } | { readonly _tag: 'Step'; readonly step: string }
@@ -13,6 +14,9 @@ export type AcpUpdate = { readonly _tag: 'Text'; readonly delta: string } | { re
 /** One agent session on one account. Each prompt streams until the agent ends its turn. */
 export interface AcpSession {
   readonly sessionId: string
+  /** The agent's own model before the account's was set, when the agent says. */
+  readonly defaultModel: string | undefined
+  setModel(model: string): Effect.Effect<void, AgentError>
   prompt(text: string): Stream.Stream<AcpUpdate, AgentError>
 }
 
@@ -20,7 +24,11 @@ export interface AcpSession {
 export type Launch = (account: AgentAccount, cwd: string) => Effect.Effect<{ target: acp.Stream | acp.AgentApp; output: () => string }, AgentError, Scope.Scope>
 
 // Claude Code's own settings could allow tools past the gate; its ACP adapter takes SDK options here.
-const claudeOptions = { claudeCode: { options: { settingSources: [], disallowedTools: ['Edit', 'Write', 'NotebookEdit', 'WebFetch', 'WebSearch', 'Task'] } } }
+const disallowedTools = ['Edit', 'Write', 'NotebookEdit', 'WebFetch', 'WebSearch', 'Task']
+const claudeOptions = { claudeCode: { options: { settingSources: [], disallowedTools } } }
+// The ticket session loads the user's own config so their tracker MCP servers are there; it never sees PR code, and can't read files or fetch URLs.
+// Residual risk: tools the user auto-allows in that config are approved by Claude Code itself and never reach ticketPermission.
+const ticketOptions = { claudeCode: { options: { settingSources: ['user'], disallowedTools: [...disallowedTools, 'Read', 'Glob', 'Grep', 'Bash'] } } }
 const READ_ONLY_MODES = [/read.?only/i, /^ask$/i, /^plan$/i, /^default$/i, /manual/i]
 
 const agentError = (e: unknown, output = '') =>
@@ -55,14 +63,14 @@ export const spawnAgent: Launch = (account, cwd) =>
     return { target, output: () => output }
   })
 
-export class Acp extends Context.Service<Acp, { open(account: AgentAccount, cwd: string, resume?: string): Effect.Effect<AcpSession, AgentError, Scope.Scope> }>()(
+export class Acp extends Context.Service<Acp, { open(account: AgentAccount, cwd: string, resume?: string, o?: { related?: ReadonlyArray<string>; tickets?: boolean }): Effect.Effect<AcpSession, AgentError, Scope.Scope> }>()(
   'pr-review/Acp',
 ) {
   static readonly layerWith = (launch: Launch) =>
     Layer.succeed(
       Acp,
       Acp.of({
-        open: (account, cwd, resume) =>
+        open: (account, cwd, resume, o) =>
           Effect.gen(function* () {
             const { target, output } = yield* launch(account, cwd)
             const updates = yield* Queue.unbounded<acp.SessionNotification | 'stop'>()
@@ -74,7 +82,9 @@ export class Acp extends Context.Service<Acp, { open(account: AgentAccount, cwd:
               .onNotification(acp.methods.client.session.update, (ctx) => void Queue.offerUnsafe(updates, ctx.params))
               .onRequest(acp.methods.client.session.requestPermission, (ctx) => {
                 const raw = ctx.params.toolCall.rawInput as { command?: unknown } | undefined
-                const allowed = ctx.params.toolCall.kind === 'execute' && typeof raw?.command === 'string' && safeGitCommand(raw.command)
+                const allowed = o?.tickets
+                  ? ticketPermission(ctx.params.toolCall)
+                  : ctx.params.toolCall.kind === 'execute' && typeof raw?.command === 'string' && (safeGitCommand(raw.command) || safeGhCommand(raw.command, o?.related ?? []))
                 const option = ctx.params.options.find((o) => o.kind === (allowed ? 'allow_once' : 'reject_once')) ?? ctx.params.options.find((o) => o.kind.startsWith(allowed ? 'allow' : 'reject'))
                 return option ? { outcome: { outcome: 'selected', optionId: option.optionId } } : { outcome: { outcome: 'cancelled' } }
               })
@@ -86,12 +96,13 @@ export class Acp extends Context.Service<Acp, { open(account: AgentAccount, cwd:
 
             const init = yield* call(() => agent.request(acp.methods.agent.initialize, { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} }))
             const caps = init.agentCapabilities
+            const _meta = o?.tickets ? ticketOptions : claudeOptions
             const start = () =>
               resume
                 ? caps?.sessionCapabilities?.resume
-                  ? agent.request(acp.methods.agent.session.resume, { sessionId: resume, cwd, mcpServers: [], _meta: claudeOptions })
-                  : agent.request(acp.methods.agent.session.load, { sessionId: resume, cwd, mcpServers: [], _meta: claudeOptions })
-                : agent.request(acp.methods.agent.session.new, { cwd, mcpServers: [], _meta: claudeOptions })
+                  ? agent.request(acp.methods.agent.session.resume, { sessionId: resume, cwd, mcpServers: [], _meta })
+                  : agent.request(acp.methods.agent.session.load, { sessionId: resume, cwd, mcpServers: [], _meta })
+                : agent.request(acp.methods.agent.session.new, { cwd, mcpServers: [], _meta })
             // Agents that keep their own login (Cursor, Gemini) want it named first; an API key is never offered.
             const login = init.authMethods?.find((m) => m.id !== 'api-key' && !('type' in m && m.type === 'terminal'))
             const session = yield* call(start).pipe(
@@ -113,11 +124,21 @@ export class Acp extends Context.Service<Acp, { open(account: AgentAccount, cwd:
             const mode = account.mode ?? READ_ONLY_MODES.map((r) => modes?.find((m) => r.test(m.id))?.id).find(Boolean)
             if (mode && mode !== ('modes' in session ? session.modes?.currentModeId : undefined))
               yield* call(() => agent.request(acp.methods.agent.session.setMode, { sessionId, modeId: mode }))
-            if (account.model) yield* call(() => agent.request(acp.methods.agent.session.setConfigOption, { sessionId, configId: 'model', value: account.model! }))
+            const options = (session as { configOptions?: ReadonlyArray<acp.SessionConfigOption> | null }).configOptions
+            const current = options?.find((c) => c.id === 'model')?.currentValue
+            const defaultModel = typeof current === 'string' ? current : undefined
+            let model = defaultModel
+            const setModel = (value: string): Effect.Effect<void, AgentError> =>
+              Effect.suspend(() =>
+                value === model ? Effect.void : call(() => agent.request(acp.methods.agent.session.setConfigOption, { sessionId, configId: 'model', value })).pipe(Effect.map(() => void (model = value))),
+              )
+            if (account.model) yield* setModel(account.model)
 
             const steps = new Set<string>()
             return {
               sessionId,
+              defaultModel,
+              setModel,
               prompt: (text) =>
                 Stream.unwrap(
                   Effect.gen(function* () {

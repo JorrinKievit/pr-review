@@ -1,22 +1,40 @@
-import type { DecisionStates, Rereview, SortResult } from '@pr-review/domain'
+import type { DecisionStates, Finding, Rereview, SortResult } from '@pr-review/domain'
 import { cn } from '../lib/utils.ts'
-import { type Item, itemFiles, itemId, itemTitle, itemTone } from '../review/items.ts'
-import { Dot, type DotTone, Spinner } from '../ui/index.tsx'
+import { SeverityPill } from '../review/Findings.tsx'
+import { type Item, itemFiles, itemId, itemTitle, itemTone, worstSeverity } from '../review/items.ts'
+import { Dot, type DotTone } from '../ui/index.tsx'
 
 type Row = { item: Item; i: number }
 
 /** Piles in review order. The bar shows where the changed lines went: decisions, skim, trusted. */
-export function Sidebar(props: { items: ReadonlyArray<Item>; selected: number; states: DecisionStates; rereview: Rereview; result: SortResult | undefined; onSelect: (i: number) => void }) {
+export function Sidebar(props: {
+  items: ReadonlyArray<Item>
+  selected: number
+  states: DecisionStates
+  rereview: Rereview
+  result: SortResult | undefined
+  /** Claude's findings still open. */
+  findings: ReadonlyArray<Finding>
+  /** What the opinion found about the PR's ticket. */
+  ticket?: string | undefined
+  onSelect: (i: number) => void
+}) {
   const groups = [
     { label: 'PR', kind: 'description' },
     { label: 'Decisions', kind: 'decision' },
     { label: 'Skim', kind: 'skim' },
     { label: 'Trusted', kind: 'trusted' },
-    { label: 'Sorting', kind: 'unsorted' },
+    { label: 'Files', kind: 'unsorted' },
   ] as const
   const lines = props.result?.lines
   const total = lines ? lines.decision + lines.skim + lines.trusted || 1 : 1
+  const changed = Object.keys(props.rereview).length
   const verdictOf = (item: Item) => props.states[itemId(item) ?? '']
+  const worst = (rows: ReadonlyArray<Row>) => {
+    const ids = new Set(rows.map((r) => itemId(r.item)))
+    const s = worstSeverity(props.findings.filter((f) => ids.has(f.decisionId ?? undefined)))
+    return s && <SeverityPill severity={s} short />
+  }
 
   const row = ({ item, i }: Row) => (
     <button
@@ -31,6 +49,7 @@ export function Sidebar(props: { items: ReadonlyArray<Item>; selected: number; s
     >
       <Dot tone={itemTone(item, verdictOf(item), (itemId(item) ?? '') in props.rereview)} />
       <span className="min-w-0 flex-1 truncate">{item.kind === 'unsorted' ? 'All files' : itemTitle(item)}</span>
+      {item.kind === 'decision' && worst([{ item, i }])}
       {item.kind !== 'decision' && item.kind !== 'description' && <span className="text-xs text-dim">{itemFiles(item).length}</span>}
     </button>
   )
@@ -52,6 +71,7 @@ export function Sidebar(props: { items: ReadonlyArray<Item>; selected: number; s
         >
           <Dot tone={tone} />
           <span className="min-w-0 flex-1 truncate">{name}</span>
+          {!open && worst(rows)}
           <span className={cn('text-xs tabular-nums', decided.length === rows.length ? 'text-ok' : 'text-dim')}>{`${decided.length}/${rows.length}`}</span>
         </button>
         {open && (
@@ -72,6 +92,12 @@ export function Sidebar(props: { items: ReadonlyArray<Item>; selected: number; s
           <i className="block rounded-sm bg-dim" style={{ width: `${(lines.trusted / total) * 100}%` }} />
         </div>
       )}
+      {props.ticket && (
+        <p className="mx-2 mb-1 truncate text-xs text-dim" title={props.ticket}>
+          Ticket: {props.ticket}
+        </p>
+      )}
+      {changed > 0 && <p className="mx-2 mb-1 text-xs text-warn">{`${changed} ${changed === 1 ? 'decision' : 'decisions'} changed since you looked`}</p>}
       {groups.map((g) => {
         const rows = props.items.map((item, i) => ({ item, i })).filter((r) => r.item.kind === g.kind)
         if (rows.length === 0) return null
@@ -79,10 +105,7 @@ export function Sidebar(props: { items: ReadonlyArray<Item>; selected: number; s
         return (
           <section key={g.kind}>
             <h3 className="flex justify-between px-2 pt-2.5 pb-1 text-xs font-normal text-dim">
-              <span className="flex items-center gap-1.5">
-                {g.label}
-                {g.kind === 'unsorted' && <Spinner className="size-3" />}
-              </span>
+              <span>{g.label}</span>
               <span>{decided !== undefined ? `${decided} / ${rows.length}` : g.kind === 'description' ? '' : rows.reduce((n, r) => n + itemFiles(r.item).length, 0)}</span>
             </h3>
             {g.kind === 'decision'

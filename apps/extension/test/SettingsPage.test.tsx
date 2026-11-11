@@ -1,4 +1,4 @@
-import { type AccountStatus, defaultSettings, type Settings } from '@pr-review/domain'
+import { type AccountStatus, defaultSettings, type Settings, smallPrLines } from '@pr-review/domain'
 import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { Effect, Exit, Layer, Scope } from 'effect'
@@ -67,3 +67,50 @@ test('storage that fails still shows the settings', async () => {
   setup({ storageFails: true })
   expect(await screen.findByLabelText('Hosts', {}, { timeout: 8000 })).toHaveValue('github.com')
 }, 10_000)
+
+test('adds a repo with a related repo and a review skill', async () => {
+  const { storage } = setup({ stored: defaultSettings })
+  await userEvent.click(await screen.findByRole('button', { name: 'Add repo' }))
+  await userEvent.type(screen.getByLabelText('Repo'), 'github.com/o/r')
+  await userEvent.type(screen.getByLabelText('Related repos'), 'github.com/o/svc: owns the API spec')
+  await userEvent.type(screen.getByLabelText('Review skill'), '.agents/skills/review/SKILL.md')
+  await userEvent.click(screen.getByRole('button', { name: 'Save' }))
+  await screen.findByText('Saved.', {}, { timeout: 3000 })
+  expect((storage.settings as Settings).repos).toEqual({
+    'github.com/o/r': { related: [{ repo: 'github.com/o/svc', note: 'owns the API spec' }], reviewSkill: '.agents/skills/review/SKILL.md' },
+  })
+})
+
+test('account checkboxes set tickets and deep', async () => {
+  const { storage } = setup({ stored: defaultSettings })
+  await userEvent.click(await screen.findByLabelText('Can read tickets'))
+  await userEvent.click(screen.getByLabelText('Use for Dig deeper'))
+  await userEvent.click(screen.getByRole('button', { name: 'Save' }))
+  await screen.findByText('Saved.', {}, { timeout: 3000 })
+  expect((storage.settings as Settings).accounts[0]).toMatchObject({ tickets: true, deep: true })
+})
+
+test("saves Claude's opinion mode, the small PR threshold and a fast model", async () => {
+  const { storage } = setup({ stored: defaultSettings })
+  expect(await screen.findByLabelText(/^Claude's opinion/, {}, { timeout: 3000 })).toHaveValue('automatic')
+  expect(screen.getByLabelText(/^Small PR threshold/)).toHaveAttribute('placeholder', '200')
+  await userEvent.selectOptions(screen.getByLabelText(/^Claude's opinion/), 'on-demand')
+  await userEvent.type(screen.getByLabelText(/^Small PR threshold/), '120')
+  await userEvent.type(screen.getByLabelText(/^Fast model/), 'haiku')
+  await userEvent.click(screen.getByRole('button', { name: 'Save' }))
+  await screen.findByText('Saved.', {}, { timeout: 3000 })
+  const saved = storage.settings as Settings
+  expect(saved.review).toMatchObject({ opinions: 'on-demand', smallPrLines: 120 })
+  expect(saved.accounts[0]).toMatchObject({ fastModel: 'haiku' })
+})
+
+test('clearing the small PR threshold goes back to the default', async () => {
+  const { storage } = setup({ stored: { ...defaultSettings, review: { ...defaultSettings.review, smallPrLines: 50 } } })
+  expect(await screen.findByLabelText(/^Small PR threshold/, {}, { timeout: 3000 })).toHaveValue(50)
+  await userEvent.clear(screen.getByLabelText(/^Small PR threshold/))
+  await userEvent.click(screen.getByRole('button', { name: 'Save' }))
+  await screen.findByText('Saved.', {}, { timeout: 3000 })
+  const saved = storage.settings as Settings
+  expect(saved.review).not.toHaveProperty('smallPrLines')
+  expect(smallPrLines(saved)).toBe(200)
+})

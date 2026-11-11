@@ -1,20 +1,40 @@
-import type { Decision, DecisionState, DecisionStates, FileStat, PrView, SkimArea, SortEvent, SortResult, TrustedGroup } from '@pr-review/domain'
+import type { Decision, DecisionState, DecisionStates, FileStat, Finding, FindingStates, PrOpinion, PrView, Severity, SkimArea, SortResult, TrustedGroup } from '@pr-review/domain'
 import type { DotTone } from '../ui/index.tsx'
 
 export type Item =
   | { readonly kind: 'decision'; readonly key: string; readonly decision: Decision; readonly unclaimed: boolean }
-  | { readonly kind: 'skim'; readonly key: string; readonly area: SkimArea }
+  /** `opinionId` names the opinion on it: the quick pass's take on the whole change. */
+  | { readonly kind: 'skim'; readonly key: string; readonly area: SkimArea; readonly opinionId?: string }
   | { readonly kind: 'trusted'; readonly key: string; readonly group: TrustedGroup }
   | { readonly kind: 'unsorted'; readonly key: string; readonly files: ReadonlyArray<string> }
   | { readonly kind: 'description'; readonly key: string }
 
 export const description: Item = { kind: 'description', key: 'about' }
 
-/** Sidebar order: the description, decisions, skim areas, trusted groups. Until the sort is done every file sits in one Unsorted item. */
-export function buildItems(pr: PrView, sort: SortEvent | undefined): ReadonlyArray<Item> {
-  const about = pr.body.trim() ? [description] : []
-  if (sort?._tag !== 'Done') return [...about, { kind: 'unsorted', key: 'unsorted', files: pr.files.map((f) => f.path) }]
-  return [...about, ...itemsOf(sort.result, byTheme)]
+/** Sidebar order: the description, decisions, skim areas, trusted groups. Without a review every file sits in one Unsorted item. */
+export function buildItems(pr: PrView, review?: { sort: SortResult; opinion: PrOpinion | null; findingStates: FindingStates }): ReadonlyArray<Item> {
+  const about: Item[] = pr.body.trim() ? [description] : []
+  if (!review) return [...about, { kind: 'unsorted', key: 'unsorted', files: pr.files.map((f) => f.path) }]
+  const worst = new Map(review.opinion?.decisions.map((o): [string, number] => [o.decisionId, rank(worstSeverity(o.findings.filter((f) => isOpen(f, review.findingStates))))]))
+  // Themes stay together so the sidebar reads in the order j and k move; a theme ranks by its worst decision.
+  const bySeverity = (ds: ReadonlyArray<Decision>) => byTheme([...ds].sort((a, b) => (worst.get(a.id) ?? severities.length) - (worst.get(b.id) ?? severities.length)))
+  return [...about, ...itemsOf(review.sort, bySeverity)]
+}
+
+const severities: ReadonlyArray<Severity> = ['blocks', 'should', 'ask']
+const rank = (s: Severity | undefined) => (s ? severities.indexOf(s) : severities.length)
+export const worstSeverity = (findings: ReadonlyArray<Finding>): Severity | undefined => severities.find((s) => findings.some((f) => f.severity === s))
+
+/** Neither posted nor dismissed, and not already handled higher in the stack. */
+export const isOpen = (f: Finding, states: FindingStates) => !states[f.id] && f.handledIn === null
+
+/** Whether a PR built on this one has a new head since the opinion ran; the PRs above are picked as the companion picks them. */
+export function stackMoved(pr: PrView, heads: Readonly<Record<string, string>>): boolean {
+  const i = pr.stack.findIndex((e) => e.number === pr.number)
+  if (i < 0) return Object.keys(heads).length > 0
+  const refs = new Set([pr.stack[i]!.headRef])
+  const above = pr.stack.slice(i + 1).filter((e) => refs.has(e.baseRef) && refs.add(e.headRef))
+  return above.length !== Object.keys(heads).length || above.some((e) => heads[e.number] !== e.headSha)
 }
 
 /** Decisions of a theme next to each other, themes in the order Claude first named them. */
@@ -35,7 +55,7 @@ export function itemsOf(result: SortResult, order: (ds: ReadonlyArray<Decision>)
   const unclaimed = new Set(result.unclaimedDecisionIds)
   return [
     ...order(result.decisions).map((decision): Item => ({ kind: 'decision', key: `d:${decision.id}`, decision, unclaimed: unclaimed.has(decision.id) })),
-    ...result.skim.map((area): Item => ({ kind: 'skim', key: `s:${area.area}`, area })),
+    ...result.skim.map((area): Item => ({ kind: 'skim', key: `s:${area.area}`, area, ...(result.quick ? { opinionId: 'changes' } : {}) })),
     ...result.trusted.map((group): Item => ({ kind: 'trusted', key: `t:${group.group}`, group })),
   ]
 }

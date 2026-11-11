@@ -1,4 +1,4 @@
-import { type AskTarget, type DecisionState, type Draft, type PrRef, ReviewRpcs } from '@pr-review/domain'
+import { type AskTarget, type DecisionState, type Draft, type FindingState, type PrRef, ReviewRpcs } from '@pr-review/domain'
 import { portClientProtocol } from '@pr-review/native-messaging'
 import { Effect, Layer, Stream } from 'effect'
 import { Atom, AtomRpc } from 'effect/reactivity'
@@ -29,9 +29,9 @@ export const makeAtoms = (client: Client) => {
     return yield* client
   })
   const pr = Atom.family((key: string) => Atom.keepAlive(client.runtime.atom(Effect.flatMap(rpc, (c) => c('GetPr', { ref: parse(key) })))))
-  const sort = Atom.family((key: string) => {
+  const review = Atom.family((key: string) => {
     const [ref, headSha] = key.split('@') as [string, string]
-    return Atom.keepAlive(client.runtime.atom(Stream.unwrap(Effect.map(rpc, (c) => c('Sort', { ref: parse(ref), headSha })))))
+    return Atom.keepAlive(client.runtime.atom(Stream.unwrap(Effect.map(rpc, (c) => c('Review', { ref: parse(ref), headSha })))))
   })
   const patch = Atom.family((key: string) => {
     const { ref, mergeBase, headSha, path, previous } = JSON.parse(key) as { ref: PrRef; mergeBase: string; headSha: string; path: string; previous?: string }
@@ -43,23 +43,70 @@ export const makeAtoms = (client: Client) => {
   const descriptions = Atom.family((key: string) => client.runtime.atom(Effect.flatMap(rpc, (c) => c('GetDescription', { ref: parse(key) }))).pipe(Atom.setIdleTTL('10 seconds')))
   const recall = Atom.family((key: string) => client.runtime.atom(Effect.flatMap(rpc, (c) => c('Recall', { key }))).pipe(Atom.setIdleTTL('5 minutes')))
   const drafts = Atom.family((key: string) => client.runtime.atom(Effect.flatMap(rpc, (c) => c('GetDrafts', { ref: parse(key) }))).pipe(Atom.keepAlive))
+  const rules = Atom.family((key: string) => {
+    const { ref, text } = JSON.parse(key) as { ref: PrRef; text: string }
+    return client.runtime.atom(Effect.flatMap(rpc, (c) => c('DraftRule', { ref, text }))).pipe(Atom.setIdleTTL('1 minute'))
+  })
   const chats = Atom.family((key: string) => {
     const [ref, headSha] = key.split('@') as [string, string]
     return client.runtime.atom(Effect.flatMap(rpc, (c) => c('GetChats', { ref: parse(ref), headSha }))).pipe(Atom.setIdleTTL('5 minutes'))
   })
   const chatsAtom = (ref: PrRef, headSha: string) => chats(`${refKey(ref)}@${headSha}`)
   const stack = Atom.family((key: string) => Atom.keepAlive(client.runtime.atom(Stream.unwrap(Effect.map(rpc, (c) => c('Stack', { ref: parse(key) }))))))
+  const opinion = Atom.family((key: string) => {
+    const [ref, headSha, run] = key.split('@') as [string, string, string]
+    return Atom.keepAlive(
+      client.runtime.atom((get) =>
+        Stream.unwrap(Effect.map(rpc, (c) => c('Opinion', { ref: parse(ref), headSha, run: run === 'run' }))).pipe(
+          Stream.tap((e) => (e._tag === 'Done' && run === 'run' ? Effect.sync(() => get.refresh(cachedOpinion(ref, headSha))) : Effect.void)),
+        ),
+      ),
+    )
+  })
+  const cachedOpinion = (ref: string, headSha: string): Atom.Atom<unknown> => opinion(`${ref}@${headSha}@cached`)
+  const stackOpinion = Atom.family((key: string) => {
+    const [ref, run] = key.split('@') as [string, string]
+    return Atom.keepAlive(
+      client.runtime.atom((get) =>
+        Stream.unwrap(Effect.map(rpc, (c) => c('StackOpinion', { ref: parse(ref), run: run === 'run' }))).pipe(
+          Stream.tap((e) => (e._tag === 'Done' && run === 'run' ? Effect.sync(() => get.refresh(cachedStackOpinion(ref))) : Effect.void)),
+        ),
+      ),
+    )
+  })
+  const cachedStackOpinion = (ref: string): Atom.Atom<unknown> => stackOpinion(`${ref}@cached`)
+  const deeper = Atom.family((key: string) => {
+    const { ref, headSha, decisionId } = JSON.parse(key) as { ref: PrRef; headSha: string; decisionId: string }
+    return Atom.keepAlive(
+      client.runtime.atom((get) =>
+        Stream.unwrap(Effect.map(rpc, (c) => c('DigDeeper', { ref, headSha, decisionId }))).pipe(
+          Stream.tap((e) => (e._tag === 'Done' ? Effect.sync(() => get.refresh(cachedOpinion(refKey(ref), headSha))) : Effect.void)),
+        ),
+      ),
+    )
+  })
 
   return {
     prAtom: (ref: PrRef) => pr(refKey(ref)),
-    /** Latest `SortEvent`: Running while the agent works, then Done. */
-    sortAtom: (ref: PrRef, headSha: string) => sort(`${refKey(ref)}@${headSha}`),
+    /** Latest `ReviewEvent`: Preparing while the companion works, then Done with the sort and the opinion. */
+    reviewAtom: (ref: PrRef, headSha: string) => review(`${refKey(ref)}@${headSha}`),
     /** `previous` is the path before the PR moved the file. */
     patchAtom: (ref: PrRef, mergeBase: string, headSha: string, path: string, previous?: string) => patch(JSON.stringify({ ref, mergeBase, headSha, path, previous })),
     stackAtom: (ref: PrRef) => stack(refKey(ref)),
     stateAtom: client.runtime.fn((a: { ref: PrRef; headSha: string; decisionId: string; state: DecisionState | null }) =>
       Effect.flatMap(rpc, (c) => c('SetState', a)),
     ),
+    /** Claude's opinion on the PR. With `run` false it only reads a cached one (`Idle` without); a finished run refreshes that one, which the page shows. */
+    opinionAtom: (ref: PrRef, headSha: string, run: boolean) => opinion(`${refKey(ref)}@${headSha}@${run ? 'run' : 'cached'}`),
+    /** One opinion on the stack as a whole. With `run` false it only reads a cached one (`Idle` without); a finished run refreshes that one. */
+    stackOpinionAtom: (ref: PrRef, run: boolean) => stackOpinion(`${refKey(ref)}@${run ? 'run' : 'cached'}`),
+    /** One decision looked at again on the strongest model; when done the cached opinion carries it. */
+    deeperAtom: (ref: PrRef, headSha: string, decisionId: string) => deeper(JSON.stringify({ ref, headSha, decisionId })),
+    findingStateAtom: client.runtime.fn((a: { ref: PrRef; headSha: string; findingId: string; state: FindingState | null }, get) =>
+      Effect.flatMap(rpc, (c) => c('SetFindingState', a)).pipe(Effect.tap(() => Effect.sync(() => get.refresh(cachedOpinion(refKey(a.ref), a.headSha))))),
+    ),
+    /** The rule Claude drafts from a review comment; read when the dialog opens, nothing is written. */
+    ruleAtom: (ref: PrRef, text: string) => rules(JSON.stringify({ ref, text })),
     /** Saved conversations for a head; refreshed whenever an answer finishes. */
     chatsAtom,
     /** The question being answered for a key (a line range or a decision), with the answer so far. Kept alive so closing the panel doesn't abort a paid answer. */

@@ -1,4 +1,4 @@
-import { type AccountStatus, type AgentAccount, agentPresets, defaultSettings, Settings } from '@pr-review/domain'
+import { type AccountStatus, type AgentAccount, agentPresets, defaultSettings, opinionsMode, type RepoSettings, Settings, smallPrLines } from '@pr-review/domain'
 import { Effect, Schema } from 'effect'
 import { type ReactNode, useEffect, useState } from 'react'
 import { Input } from '../components/ui/input.tsx'
@@ -48,7 +48,7 @@ function AccountCard(props: { account: AgentAccount; status: AccountStatus | und
   const [env, setEnv] = useState(envText(a.env))
   const set = (patch: Partial<AgentAccount>) => props.onChange({ ...a, ...patch })
   /** Empty clears an optional field. */
-  const setOptional = (key: 'mode' | 'model', value: string) => {
+  const setOptional = (key: 'mode' | 'model' | 'fastModel', value: string) => {
     const { [key]: _, ...rest } = a
     props.onChange(value ? { ...rest, [key]: value } : rest)
   }
@@ -72,12 +72,26 @@ function AccountCard(props: { account: AgentAccount; status: AccountStatus | und
         <Field label="Environment" hint={preset?.loginEnv ? `One per line. A separate ${preset.loginEnv} is a separate login.` : 'One KEY=value per line.'}>
           <Textarea rows={2} className="font-mono text-sm" value={env} placeholder={preset?.loginEnv ? `${preset.loginEnv}=~/.my-other-login` : ''} onChange={(e) => setEnv(e.target.value)} onBlur={() => set({ env: envOf(env) })} />
         </Field>
-        <div className="grid grid-cols-3 gap-3">
+        <div className="flex gap-4 text-sm text-muted-foreground sm:col-span-2">
+          <div className="flex flex-col gap-0.5">
+            <label className="flex items-center gap-1.5">
+              <input type="checkbox" checked={a.tickets ?? false} onChange={(e) => set({ tickets: e.target.checked })} /> Can read tickets
+            </label>
+            <span className="text-xs text-dim">Only for an account whose auto-allowed tools are read-only. The ticket session loads its own settings.</span>
+          </div>
+          <label className="flex items-center gap-1.5">
+            <input type="checkbox" checked={a.deep ?? false} onChange={(e) => set({ deep: e.target.checked })} /> Use for Dig deeper
+          </label>
+        </div>
+        <div className="grid grid-cols-4 gap-3">
           <Field label="Mode" hint="Read-only mode">
             <Input className="font-mono text-sm" value={a.mode ?? ''} placeholder="auto" onChange={(e) => setOptional('mode', e.target.value)} />
           </Field>
           <Field label="Model" hint="Agent default if empty">
             <Input className="font-mono text-sm" value={a.model ?? ''} onChange={(e) => setOptional('model', e.target.value)} />
+          </Field>
+          <Field label="Fast model" hint="For low-impact decisions and ticket reads">
+            <Input className="font-mono text-sm" value={a.fastModel ?? ''} onChange={(e) => setOptional('fastModel', e.target.value)} />
           </Field>
           <Field label="At once">
             <Input type="number" min={1} max={8} value={a.concurrency} onChange={(e) => set({ concurrency: Math.max(1, Number(e.target.value) || 1) })} />
@@ -199,8 +213,35 @@ export function SettingsPage() {
             <Field label="Time limit per run (minutes)">
               <Input type="number" min={1} value={review.timeoutMinutes} onChange={(e) => setReview({ timeoutMinutes: Number(e.target.value) || defaultSettings.review.timeoutMinutes })} />
             </Field>
+            <Field label="Claude's opinion" hint="Automatic waits for the opinion with the sort; on demand adds a button.">
+              <select
+                className="h-9 rounded-md border border-input bg-transparent px-2 text-sm shadow-xs dark:bg-input/30"
+                value={opinionsMode(settings)}
+                onChange={(e) => setReview({ opinions: e.target.value as 'automatic' | 'on-demand' })}
+              >
+                <option value="automatic">Automatic</option>
+                <option value="on-demand">On demand</option>
+              </select>
+            </Field>
+            <Field label="Small PR threshold (changed lines)" hint="Below this one quick read replaces the piles. Tests, generated files and lockfiles don't count.">
+              <Input
+                type="number"
+                min={0}
+                value={review.smallPrLines ?? ''}
+                placeholder={String(smallPrLines(defaultSettings))}
+                onChange={(e) => {
+                  // Empty means the default, not 0 (which turns the quick read off).
+                  const { smallPrLines: _, ...rest } = review
+                  setSettings({ ...settings, review: e.target.value === '' ? rest : { ...review, smallPrLines: Number(e.target.value) } })
+                }}
+              />
+            </Field>
           </div>
         </div>
+      </Section>
+
+      <Section title="Repos" hint="Per-repo review settings, keyed host/owner/repo. Related repos go one per line as host/owner/repo: what it is, and are read at their default branch.">
+        <ReposEditor value={settings.repos ?? {}} onChange={(repos) => setSettings({ ...settings, repos })} />
       </Section>
 
       <div className="sticky bottom-0 flex items-center gap-3 border-t border-border bg-background/95 py-3 backdrop-blur">
@@ -238,5 +279,58 @@ function TrustRules(props: { value: Settings['review']['likelyTrusted']; onChang
     <Field label="Probably trusted" hint="group: glob, glob. The agent confirms or moves them; trusted piles start accepted.">
       <Textarea rows={6} className="font-mono text-sm" value={text} onChange={(e) => setText(e.target.value)} onBlur={() => props.onChange(parse(text))} />
     </Field>
+  )
+}
+
+const relatedText = (r: RepoSettings['related']) => r.map((x) => `${x.repo}: ${x.note}`)
+const relatedOf = (ls: ReadonlyArray<string>) =>
+  ls.flatMap((l) => {
+    const at = l.indexOf(':')
+    const repo = (at < 0 ? l : l.slice(0, at)).trim()
+    return repo ? [{ repo, note: at < 0 ? '' : l.slice(at + 1).trim() }] : []
+  })
+
+/** Rows are kept locally so a repo with no name yet can be typed; only named ones are saved. */
+function ReposEditor(props: { value: Readonly<Record<string, RepoSettings>>; onChange: (v: Record<string, RepoSettings>) => void }) {
+  const [rows, setRows] = useState(() => Object.entries(props.value).map(([key, repo]) => ({ id: crypto.randomUUID(), key, repo })))
+  const update = (next: typeof rows) => {
+    setRows(next)
+    props.onChange(Object.fromEntries(next.filter((r) => r.key.trim()).map((r) => [r.key.trim(), r.repo])))
+  }
+  const patch = (id: string, p: Partial<(typeof rows)[number]>) => update(rows.map((r) => (r.id === id ? { ...r, ...p } : r)))
+  return (
+    <>
+      <div className="flex flex-col gap-3">
+        {rows.map((r) => (
+          <div key={r.id} className="rounded-lg border border-border bg-card p-3">
+            <div className="mb-3 flex items-end gap-2">
+              <Field label="Repo" className="flex-1">
+                <Input className="font-mono text-sm" placeholder="host/owner/repo" value={r.key} onChange={(e) => patch(r.id, { key: e.target.value })} />
+              </Field>
+              <Button size="xs" variant="ghost" onClick={() => update(rows.filter((x) => x.id !== r.id))}>
+                Remove
+              </Button>
+            </div>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <LinesField label="Related repos" value={relatedText(r.repo.related)} onChange={(ls) => patch(r.id, { repo: { ...r.repo, related: relatedOf(ls) } })} />
+              <Field label="Review skill">
+                <Input
+                  className="font-mono text-sm"
+                  placeholder="Path in this repo, read at its default branch"
+                  value={r.repo.reviewSkill ?? ''}
+                  onChange={(e) => {
+                    const { reviewSkill: _, ...rest } = r.repo
+                    patch(r.id, { repo: e.target.value ? { ...rest, reviewSkill: e.target.value } : rest })
+                  }}
+                />
+              </Field>
+            </div>
+          </div>
+        ))}
+      </div>
+      <Button className="mt-3" size="xs" variant="outline" onClick={() => update([...rows, { id: crypto.randomUUID(), key: '', repo: { related: [] } }])}>
+        Add repo
+      </Button>
+    </>
   )
 }

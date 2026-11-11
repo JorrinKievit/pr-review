@@ -3,7 +3,7 @@ import { assert, describe, it } from '@effect/vitest'
 import { type AgentAccount, AgentError, defaultSettings } from '@pr-review/domain'
 import { Deferred, Effect, Fiber, Layer, Schema, Stream } from 'effect'
 import { TestClock } from 'effect/testing'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { Acp } from '../src/Acp.ts'
 import { Agent } from '../src/Agent.ts'
@@ -15,20 +15,27 @@ const account = (id: string, concurrency = 1): AgentAccount => ({ id, name: `Age
 
 type Answer = (a: AgentAccount, prompt: string) => Effect.Effect<string, AgentError>
 
-/** An Acp whose sessions answer each prompt with `answer`, after one step. */
+/** An Acp whose sessions answer each prompt with `answer`, after one step; `|` in an answer splits it into chunks. */
 const setup = (answer: Answer, accounts = [account('a'), account('b')]) => {
-  const opened: Array<{ account: string; resume: string | undefined }> = []
+  const opened: Array<{ account: string; resume: string | undefined; cwd: string; tickets?: boolean }> = []
   const prompts: string[] = []
+  const models: string[] = []
   const acp = Layer.succeed(
     Acp,
     Acp.of({
-      open: (a, _cwd, resume) =>
+      open: (a, cwd, resume, o) =>
         Effect.sync(() => {
-          opened.push({ account: a.id, resume })
+          opened.push({ account: a.id, resume, cwd, ...(o?.tickets ? { tickets: true } : {}) })
           return {
             sessionId: resume ?? `S-${a.id}`,
+            defaultModel: 'default',
+            setModel: (m) => Effect.sync(() => void models.push(m)),
             prompt: (text) =>
-              Stream.unwrap(Effect.map(Effect.suspend(() => (prompts.push(text), answer(a, text))), (t) => Stream.make({ _tag: 'Step' as const, step: 'Reading a.ts' }, { _tag: 'Text' as const, delta: t }))),
+              Stream.unwrap(
+                Effect.map(Effect.suspend(() => (prompts.push(text), answer(a, text))), (t) =>
+                  Stream.make({ _tag: 'Step' as const, step: 'Reading a.ts' }).pipe(Stream.concat(Stream.fromIterable(t.split('|').map((delta) => ({ _tag: 'Text' as const, delta }))))),
+                ),
+              ),
           }
         }),
     }),
@@ -36,7 +43,7 @@ const setup = (answer: Answer, accounts = [account('a'), account('b')]) => {
   const cacheRoot = tmp()
   const config = Config.layerTest({ cacheRoot, settings: { ...defaultSettings, accounts } })
   const layer = Agent.layer.pipe(Layer.provide([acp, config, NodeServices.layer]))
-  return { layer, opened, prompts, usagePath: join(cacheRoot, 'usage.jsonl') }
+  return { layer, opened, prompts, models, usagePath: join(cacheRoot, 'usage.jsonl') }
 }
 
 const Ok = Schema.Struct({ ok: Schema.Boolean })
@@ -75,11 +82,43 @@ describe('Agent.structured', () => {
         const runs = yield* Effect.forEach([[], [], steps], (s) => Effect.forkChild(structured(s)))
         yield* Effect.sleep('100 millis')
         assert.deepStrictEqual(opened.map((o) => o.account).sort(), ['a', 'b'])
-        assert.include(steps, 'Waiting for a free AI account')
+        assert.include(steps, 'Waiting for a free account (Agent a, Agent b busy)')
         yield* Deferred.succeed(gate, undefined)
         yield* Fiber.joinAll(runs)
         assert.strictEqual(opened.length, 3)
       }).pipe(Effect.provide(layer))
+    }))
+
+  it.live('noWait fails at once when every slot is taken', () =>
+    Effect.gen(function* () {
+      const gate = yield* Deferred.make<void>()
+      const { layer } = setup(() => Effect.as(Deferred.await(gate), '{"ok": true}'), [account('a')])
+      yield* Effect.gen(function* () {
+        const agent = yield* Agent
+        const held = yield* Effect.forkChild(structured())
+        yield* Effect.sleep('50 millis')
+        const e = yield* Effect.flip(agent.session({ cwd: '/repo', log, noWait: true }, (turns) => turns.structured('x', Ok)))
+        assert.strictEqual(e.message, 'No AI account has a free slot')
+        yield* Deferred.succeed(gate, undefined)
+        yield* Fiber.join(held)
+      }).pipe(Effect.provide(layer))
+    }))
+
+  it.live('prefer deep picks a deep account', () =>
+    Effect.gen(function* () {
+      const { layer, opened } = setup(() => Effect.succeed('{"ok": true}'), [account('a'), { ...account('b'), deep: true }])
+      const agent = yield* Agent.pipe(Effect.provide(layer))
+      yield* agent.structured({ prompt: 'x', schema: Ok, cwd: '/repo', log, prefer: 'deep' })
+      yield* agent.structured({ prompt: 'x', schema: Ok, cwd: '/repo', log, prefer: 'deep' })
+      assert.deepStrictEqual(opened.map((o) => o.account), ['b', 'b'])
+    }))
+
+  it.live('prefer deep falls back to the pool', () =>
+    Effect.gen(function* () {
+      const { layer, opened } = setup(() => Effect.succeed('{"ok": true}'), [account('a'), { ...account('b'), deep: true, enabled: false }])
+      const agent = yield* Agent.pipe(Effect.provide(layer))
+      yield* agent.structured({ prompt: 'x', schema: Ok, cwd: '/repo', log, prefer: 'deep' })
+      assert.deepStrictEqual(opened.map((o) => o.account), ['a'])
     }))
 
   it.live('an account at its usage limit sits out, and the run moves to another', () =>
@@ -139,6 +178,121 @@ describe('Agent.structured', () => {
     }))
 })
 
+describe('Agent.session', () => {
+  const Turn = Schema.Struct({ n: Schema.Number })
+  const twoTurns = (first: 'fast' | 'main', second: 'fast' | 'main', onText?: (line: string) => Effect.Effect<void>) =>
+    Effect.gen(function* () {
+      return yield* (yield* Agent).session({ cwd: '/repo', log, ...(onText ? { onText } : {}) }, (s) =>
+        Effect.all([s.structured('one', Turn, first), s.structured('two', Turn, second, 'opinion')]),
+      )
+    })
+  const answer: Answer = (_a, p) => Effect.succeed(p.startsWith('one') ? '{"n": 1}' : '{"n": 2}')
+
+  it.live('two turns share one session', () =>
+    Effect.gen(function* () {
+      const { layer, opened, prompts, usagePath } = setup(answer)
+      assert.deepStrictEqual(yield* twoTurns('main', 'main').pipe(Effect.provide(layer)), [{ n: 1 }, { n: 2 }])
+      assert.strictEqual(opened.length, 1)
+      assert.strictEqual(prompts.length, 2)
+      const lines = readFileSync(usagePath, 'utf8').trim().split('\n').map((l) => JSON.parse(l))
+      assert.deepStrictEqual(lines.map((l) => l.kind), ['sort', 'opinion'])
+    }))
+
+  it.live('fast turn switches to fastModel and main switches back', () =>
+    Effect.gen(function* () {
+      const withModel = setup(answer, [{ ...account('a'), model: 'big', fastModel: 'quick' }])
+      yield* twoTurns('fast', 'main').pipe(Effect.provide(withModel.layer))
+      assert.deepStrictEqual(withModel.models, ['quick', 'big'])
+      const agentDefault = setup(answer, [{ ...account('a'), fastModel: 'quick' }])
+      yield* twoTurns('fast', 'main').pipe(Effect.provide(agentDefault.layer))
+      assert.deepStrictEqual(agentDefault.models, ['quick', 'default'])
+      const mainOnly = setup(answer, [{ ...account('a'), model: 'big', fastModel: 'quick' }])
+      yield* twoTurns('main', 'main').pipe(Effect.provide(mainOnly.layer))
+      assert.deepStrictEqual(mainOnly.models, [])
+    }))
+
+  it.live('no fastModel means no switch', () =>
+    Effect.gen(function* () {
+      const { layer, models } = setup(answer, [{ ...account('a'), model: 'big' }])
+      yield* twoTurns('fast', 'main').pipe(Effect.provide(layer))
+      assert.deepStrictEqual(models, [])
+    }))
+
+  it.live('onText gets whole lines', () =>
+    Effect.gen(function* () {
+      const { layer } = setup((_a, p) => Effect.succeed(p.startsWith('one') ? 'Judg|ing: first\nJudging: se|cond\n{"n"|: 1}' : '{"n": 2}'))
+      const lines: string[] = []
+      yield* twoTurns('main', 'main', (l) => Effect.sync(() => void lines.push(l))).pipe(Effect.provide(layer))
+      assert.deepStrictEqual(lines, ['Judging: first', 'Judging: second', '{"n": 1}', '{"n": 2}'])
+    }))
+
+  it.live('idle lists accounts with room', () =>
+    Effect.gen(function* () {
+      const gate = yield* Deferred.make<void>()
+      const { layer } = setup(() => Effect.as(Deferred.await(gate), '{"ok": true}'), [account('a'), account('b', 2), { ...account('c'), enabled: false }])
+      yield* Effect.gen(function* () {
+        const agent = yield* Agent
+        assert.deepStrictEqual((yield* agent.idle()).map((a) => a.id), ['a', 'b'])
+        const runs = yield* Effect.forEach([1, 2], () => Effect.forkChild(structured()))
+        yield* Effect.sleep('100 millis')
+        // a is full; b has one of two slots left.
+        assert.deepStrictEqual((yield* agent.idle()).map((a) => a.id), ['b'])
+        yield* Deferred.succeed(gate, undefined)
+        yield* Fiber.joinAll(runs)
+      }).pipe(Effect.provide(layer))
+    }))
+})
+
+describe('Agent.ticket', () => {
+  const ticket = Effect.gen(function* () {
+    return yield* (yield* Agent).ticket({ prompt: 'Fetch ABC-1', log: { ...log, kind: 'ticket' } })
+  })
+
+  it.live('runs on an account set to read tickets, in an empty temp dir removed after', () =>
+    Effect.gen(function* () {
+      const { layer, opened } = setup((_a, p) => Effect.succeed(`summary of ${p}`), [account('a'), { ...account('b'), tickets: true }])
+      assert.strictEqual(yield* ticket.pipe(Effect.provide(layer)), 'summary of Fetch ABC-1')
+      assert.deepInclude(opened[0], { account: 'b', tickets: true })
+      assert.notStrictEqual(opened[0]!.cwd, '/repo')
+      assert.isFalse(existsSync(opened[0]!.cwd))
+    }))
+
+  it.live('the fast model when asked and the account has one', () =>
+    Effect.gen(function* () {
+      const { layer, models } = setup(() => Effect.succeed('x'), [{ ...account('b'), tickets: true, fastModel: 'sonnet' }])
+      yield* Effect.gen(function* () {
+        const agent = yield* Agent
+        yield* agent.ticket({ prompt: 'Fetch ABC-1', log: { ...log, kind: 'ticket' }, model: 'fast' })
+        yield* agent.ticket({ prompt: 'Fetch ABC-1', log: { ...log, kind: 'ticket' } })
+      }).pipe(Effect.provide(layer))
+      assert.deepStrictEqual(models, ['sonnet'])
+    }))
+
+  it.live('never waits on a slot: a session holding the last one can join its own ticket read', () =>
+    Effect.gen(function* () {
+      const { layer, opened } = setup((_a, p) => Effect.succeed(p.startsWith('Fetch') ? 'the ticket' : '{"ok": true}'), [{ ...account('a'), tickets: true }])
+      const got = yield* Effect.gen(function* () {
+        const agent = yield* Agent
+        return yield* agent.session({ cwd: '/repo', log }, (turns) =>
+          Effect.gen(function* () {
+            const read = yield* Effect.forkChild(agent.ticket({ prompt: 'Fetch ABC-1', log: { ...log, kind: 'ticket' } }))
+            yield* turns.structured('Sort this', Ok)
+            return yield* Fiber.join(read)
+          }),
+        )
+      }).pipe(Effect.provide(layer), Effect.timeout('2 seconds'))
+      assert.strictEqual(got, 'the ticket')
+      assert.deepStrictEqual(opened.map((o) => o.account), ['a', 'a'])
+    }))
+
+  it.live('without such an account it says so', () =>
+    Effect.gen(function* () {
+      const { layer } = setup(() => Effect.succeed('x'), [account('a'), { ...account('b'), tickets: true, enabled: false }])
+      const e = yield* Effect.flip(ticket.pipe(Effect.provide(layer)))
+      assert.strictEqual(e.message, 'No AI account is set to read tickets')
+    }))
+})
+
 describe('Agent.streaming', () => {
   const ask = (resume?: string) =>
     Effect.gen(function* () {
@@ -158,7 +312,7 @@ describe('Agent.streaming', () => {
     Effect.gen(function* () {
       const { layer, opened } = setup(() => Effect.succeed('More.'))
       const events = yield* ask('b:S-old').pipe(Effect.provide(layer))
-      assert.deepStrictEqual(opened, [{ account: 'b', resume: 'S-old' }])
+      assert.deepStrictEqual(opened, [{ account: 'b', resume: 'S-old', cwd: '/repo' }])
       assert.deepStrictEqual(events.at(-1), { _tag: 'Done', sessionId: 'b:S-old' })
     }))
 })

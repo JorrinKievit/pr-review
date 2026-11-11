@@ -1,5 +1,6 @@
-import { type DecisionState, type DecisionStates, type Draft, type PrRef, type Rereview, ReviewRpcs, type SortResult, type SortEvent, type StackEntry, type StackEntryStatus, type StackEvent, targetKey } from '@pr-review/domain'
-import { Cause, Clock, Effect, Exit, Fiber, Layer, Option, Queue, Stream } from 'effect'
+import { AgentError, AgentRule, appendPatch, inGuidance, opinionsMode, ruleBranch, ruleTitle, type DecisionState, type DeeperEvent, type DecisionOpinion, type DecisionStates, type Draft, type FindingStates, type OpinionEvent, type PrOpinion, type PrRef, type Rereview, type ReviewEvent, ReviewRpcs, type SortResult, type SortEvent, type StackEntry, type StackEntryStatus, type StackEvent, type StackOpinion, type StackOpinionEvent, targetKey } from '@pr-review/domain'
+import { readFileSync } from 'node:fs'
+import { Cause, Clock, Effect, Exit, Fiber, Layer, Option, Queue, type Scope, Stream } from 'effect'
 import { RpcMiddleware } from 'effect/rpc'
 import { PersistedCache } from 'effect/persistence'
 import { Asker } from './Asker.ts'
@@ -7,10 +8,17 @@ import { Agent } from './Agent.ts'
 import { Config } from './Config.ts'
 import { Git } from './Git.ts'
 import { GitHub } from './GitHub.ts'
+import { sameChange } from './interdiff.ts'
+import { Opiner } from './Opiner.ts'
+import { guidanceSection } from './opinionContext.ts'
 import { Overview } from './Overview.ts'
+import { Reviewer } from './Reviewer.ts'
 import { Sorter } from './Sorter.ts'
 import { buildStack } from './stack.ts'
+import { StackOpiner } from './StackOpiner.ts'
 import { cacheOptions, type Chats, type OverviewEntry, PatchKey, Store, storeFailuresDie } from './Store.ts'
+
+const ruleInstructions = readFileSync(new URL('../prompts/rule.md', import.meta.url), 'utf8')
 
 /** Set by the release bundle; 0.0.0 is a companion run from source. */
 export const VERSION = process.env.PR_REVIEW_VERSION ?? '0.0.0'
@@ -21,6 +29,32 @@ const headKey = (ref: PrRef, headSha: string) => `${prKey(ref)}@${headSha}`
 
 /** A sort answered from cache this fast skips the Running event, so a cached page shows no spinner flash. */
 const CACHE_HIT_WINDOW = '50 millis'
+
+/** Forks `run` in `scope`; `cached` when it finished within CACHE_HIT_WINDOW. */
+const startIn = Effect.fnUntraced(function* <A, E>(scope: Scope.Scope, run: Effect.Effect<A, E>) {
+  const fiber = yield* Effect.forkIn(run, scope)
+  const cached = yield* Effect.raceFirst(Effect.as(Fiber.await(fiber), true), Effect.as(Effect.sleep(CACHE_HIT_WINDOW), false))
+  return { fiber, cached }
+})
+
+/**
+ * Streams a run forked in `scope`: Running with its steps, then the event `done` makes of its result.
+ * A run that finishes within CACHE_HIT_WINDOW was cached and emits only that.
+ */
+const progress = <A, E, Ev>(scope: Scope.Scope, run: Effect.Effect<A, E>, steps: Stream.Stream<string>, done: (a: A) => Effect.Effect<Ev>) =>
+  Stream.unwrap(
+    Effect.gen(function* () {
+      const { fiber, cached } = yield* startIn(scope, run)
+      const end = Stream.fromEffect(Effect.flatMap(Fiber.join(fiber), done))
+      if (cached) return end
+      const startedAt = new Date(yield* Clock.currentTimeMillis).toISOString()
+      const running = steps.pipe(
+        Stream.map((step) => ({ _tag: 'Running' as const, startedAt, step })),
+        Stream.interruptWhen(Fiber.await(fiber)),
+      )
+      return Stream.succeed({ _tag: 'Running' as const, startedAt }).pipe(Stream.concat(running), Stream.concat(end))
+    }),
+  )
 
 /** Everything a reviewer can give a verdict on, under the ids the page saves them with (see itemId in the extension). */
 const reviewables = (r: SortResult) => [
@@ -62,10 +96,13 @@ export const HandlersLive = ReviewRpcs.toLayer(
     const github = yield* GitHub
     const store = yield* Store
     const sorter = yield* Sorter
+    const opiner = yield* Opiner
+    const stackOpiner = yield* StackOpiner
     const asker = yield* Asker
     const overview = yield* Overview
     const agent = yield* Agent
-    // Sorts run in the companion's scope, so a closed or reloaded tab doesn't throw away a paid run.
+    const reviewer = yield* Reviewer
+    // Sorts and opinions run in the companion's scope, so a closed or reloaded tab doesn't throw away a paid run.
     const scope = yield* Effect.scope
 
     const patches = yield* PersistedCache.make(
@@ -76,15 +113,31 @@ export const HandlersLive = ReviewRpcs.toLayer(
     const statesFor = (ref: PrRef, headSha: string) =>
       store.state.get(headKey(ref, headSha)).pipe(Effect.map(Option.getOrElse((): DecisionStates => ({}))), Effect.orDie)
 
+    const findingStatesFor = (ref: PrRef, headSha: string) =>
+      store.findings.get(headKey(ref, headSha)).pipe(Effect.map(Option.getOrElse((): FindingStates => ({}))), Effect.orDie)
+
     const draftsFor = (ref: PrRef) => store.drafts.get(prKey(ref)).pipe(Effect.map(Option.getOrElse((): ReadonlyArray<Draft> => [])), Effect.orDie)
     const chatsFor = (key: string) => store.chats.get(key).pipe(Effect.map(Option.getOrElse((): typeof Chats.Type => ({}))), Effect.orDie)
 
     const keepLast = (ref: PrRef, headSha: string, result: SortResult, states: DecisionStates) =>
       store.lastVerdicts
-        .set(prKey(ref), { headSha, decisions: reviewables(result).flatMap((r) => (states[r.id] ? [{ ...r, state: states[r.id]! }] : [])) })
+        .set(prKey(ref), { headSha, ...(result.mergeBase ? { mergeBase: result.mergeBase } : {}), decisions: reviewables(result).flatMap((r) => (states[r.id] ? [{ ...r, state: states[r.id]! }] : [])) })
         .pipe(Effect.orDie)
 
     const samePaths = (a: ReadonlyArray<string>, b: ReadonlyArray<string>) => a.length === b.length && a.every((p) => b.includes(p))
+
+    /** Whether `paths` change the same way at both heads, each diffed from its own merge base when known. */
+    const unchangedBetween = (ref: PrRef, before: { headSha: string; mergeBase?: string | undefined }, after: { headSha: string; mergeBase?: string | undefined }, paths: ReadonlyArray<string>) => {
+      const repo = repoKeyOf(ref)
+      return (
+        before.mergeBase && after.mergeBase
+          ? Effect.map(Effect.all([git.diff(repo, before.mergeBase, before.headSha, paths), git.diff(repo, after.mergeBase, after.headSha, paths)]), ([a, b]) => sameChange(a, b))
+          : Effect.map(git.diff(repo, before.headSha, after.headSha, paths), (diff) => diff === '')
+      ).pipe(
+        // The old head may be gone from the clone; then nothing is carried.
+        Effect.orElseSucceed(() => false),
+      )
+    }
 
     /**
      * The verdicts for a head. A head opened for the first time takes the verdicts of the head last worked on, for each
@@ -103,11 +156,7 @@ export const HandlersLive = ReviewRpcs.toLayer(
         for (const { id, paths } of reviewables(result)) {
           const before = last.decisions.find((e) => e.id === id || samePaths(e.paths, paths))
           if (!before) continue
-          const unchanged = yield* git.diff(repoKeyOf(ref), last.headSha, headSha, [...new Set([...paths, ...before.paths])]).pipe(
-            Effect.map((diff) => diff === ''),
-            // The old head may be gone from the clone; then nothing is carried.
-            Effect.orElseSucceed(() => false),
-          )
+          const unchanged = yield* unchangedBetween(ref, last, { headSha, mergeBase: result.mergeBase }, [...new Set([...paths, ...before.paths])])
           if (unchanged) carried[id] = before.state
           else rereview[id] = { since: last.headSha, was: before.state }
         }
@@ -122,6 +171,40 @@ export const HandlersLive = ReviewRpcs.toLayer(
       yield* Effect.orDie(store.state.set(key, carried))
       if (fromLast) yield* keepLast(ref, headSha, result, carried)
       return { state: carried, rereview }
+    })
+
+    const keepOpinion = (ref: PrRef, headSha: string, opinion: PrOpinion) =>
+      Effect.flatMap(sorter.cached(ref, headSha), (sort) =>
+        Effect.orDie(store.lastOpinion.set(prKey(ref), { headSha, ...(sort?.mergeBase ? { mergeBase: sort.mergeBase } : {}), opinion })),
+      )
+
+    /**
+     * For a head with no opinion yet: the last opinion's decisions (matched by id or files, as verdicts are) whose change
+     * is the same at this head, with what the reviewer did with their findings. Needs this head's sort to be cached.
+     */
+    const carriedOpinion = Effect.fnUntraced(function* (ref: PrRef, headSha: string) {
+      const last = Option.getOrUndefined(yield* Effect.orDie(store.lastOpinion.get(prKey(ref))))
+      if (!last || last.headSha === headSha) return undefined
+      const [sort, before] = yield* Effect.all([sorter.cached(ref, headSha), sorter.cached(ref, last.headSha)])
+      if (!sort || !before) return undefined
+      const decisions: DecisionOpinion[] = []
+      for (const d of sort.decisions) {
+        const paths = d.files.map((f) => f.path)
+        const old = before.decisions.find((e) => e.id === d.id || samePaths(e.files.map((f) => f.path), paths))
+        const o = old && last.opinion.decisions.find((x) => x.decisionId === old.id)
+        if (!o || !(yield* unchangedBetween(ref, last, { headSha, mergeBase: sort.mergeBase }, [...new Set([...paths, ...old!.files.map((f) => f.path)])]))) continue
+        // Lines may have moved since the old head, and an anchor off the diff fails the whole review.
+        decisions.push({ ...o, decisionId: d.id, findings: o.findings.map((f) => ({ ...f, decisionId: d.id, anchor: null })) })
+      }
+      if (!decisions.length) return undefined
+      // Copied once, so a finding restored on this head stays restored.
+      const key = headKey(ref, headSha)
+      if (Option.isNone(yield* Effect.orDie(store.findings.get(key)))) {
+        const ids = new Set(decisions.flatMap((d) => d.findings.map((f) => f.id)))
+        const old = yield* findingStatesFor(ref, last.headSha)
+        yield* Effect.orDie(store.findings.set(key, Object.fromEntries(Object.entries(old).filter(([id]) => ids.has(id)))))
+      }
+      return { ...last.opinion, headSha, decisions, carriedFrom: last.headSha } satisfies PrOpinion
     })
 
     /** Open PRs as last seen per repo, for loads that can take them slightly stale. */
@@ -172,23 +255,65 @@ export const HandlersLive = ReviewRpcs.toLayer(
         Effect.andThen(config.repo(repoKeyOf(ref)), storeFailuresDie(patches.get(new PatchKey({ repoKey: repoKeyOf(ref), mergeBase, headSha, path, previous })))),
 
       Sort: ({ ref, headSha }) =>
+        progress(scope, sorter.sort(ref, headSha), sorter.steps(ref, headSha), (result) =>
+          Effect.map(verdictsFor(ref, headSha, result), (v): SortEvent => ({ _tag: 'Done', result, ...v })),
+        ),
+
+      Review: ({ ref, headSha }) =>
         Stream.unwrap(
           Effect.gen(function* () {
-            const sort = yield* Effect.forkIn(sorter.sort(ref, headSha), scope)
-            const cached = yield* Effect.raceFirst(Effect.as(Fiber.await(sort), true), Effect.as(Effect.sleep(CACHE_HIT_WINDOW), false))
-            const done = Effect.gen(function* () {
-              const result = yield* Fiber.join(sort)
-              return { _tag: 'Done', result, ...(yield* verdictsFor(ref, headSha, result)) } satisfies SortEvent
-            })
-            if (cached) return Stream.fromEffect(done)
-            const startedAt = new Date(yield* Clock.currentTimeMillis).toISOString()
-            const steps = sorter.steps(ref, headSha).pipe(
-              Stream.map((step): SortEvent => ({ _tag: 'Running', startedAt, step })),
-              Stream.interruptWhen(Fiber.await(sort)),
+            yield* config.repo(repoKeyOf(ref))
+            yield* reviewer.prepare(ref, headSha)
+            const { fiber, cached } = yield* startIn(scope, reviewer.result(ref, headSha))
+            const end = Stream.fromEffect(
+              Effect.gen(function* () {
+                const r = yield* Fiber.join(fiber)
+                const opinion = r.opinion ?? (yield* carriedOpinion(ref, headSha)) ?? null
+                const verdicts = yield* verdictsFor(ref, headSha, r.sort)
+                const findingStates = yield* findingStatesFor(ref, headSha)
+                return { _tag: 'Done', sort: r.sort, ...verdicts, opinion, ...(r.opinionError ? { opinionError: r.opinionError } : {}), findingStates } satisfies ReviewEvent
+              }),
             )
-            return Stream.succeed<SortEvent>({ _tag: 'Running', startedAt }).pipe(Stream.concat(steps), Stream.concat(Stream.fromEffect(done)))
+            if (cached) return end
+            return reviewer.progress(ref, headSha).pipe(
+              Stream.changesWith((a, b) => JSON.stringify(a) === JSON.stringify(b)),
+              Stream.map((phases): ReviewEvent => ({ _tag: 'Preparing', phases })),
+              Stream.interruptWhen(Fiber.await(fiber)),
+              Stream.concat(end),
+            )
           }),
         ),
+
+      // Early start only for PRs the viewer is asked to review; anything that goes wrong just means no head start.
+      Prepare: ({ ref }) =>
+        Effect.gen(function* () {
+          yield* config.repo(repoKeyOf(ref))
+          const gh = yield* github.forHost(ref.host)
+          const [pr, asked, me] = yield* Effect.all([gh.getPr(ref.owner, ref.repo, ref.number), gh.requestedReviewers(ref.owner, ref.repo, ref.number), gh.viewer()], { concurrency: 3 })
+          if (!asked.some((login) => login.toLowerCase() === me.toLowerCase())) return false
+          yield* reviewer.prepare(ref, pr.headSha)
+          return true
+        }).pipe(Effect.catch((e) => Effect.as(Effect.logDebug(e), false))),
+
+      Opinion: ({ ref, headSha, run }) => {
+        const done = (opinion: PrOpinion) => Effect.map(findingStatesFor(ref, headSha), (states): OpinionEvent => ({ _tag: 'Done', opinion, states }))
+        if (run) return progress(scope, Effect.tap(opiner.opine(ref, headSha), (o) => keepOpinion(ref, headSha, o)), opiner.steps(ref, headSha), done)
+        return Stream.unwrap(
+          Effect.map(
+            Effect.flatMap(opiner.cached(ref, headSha), (hit) => (hit ? Effect.succeed(hit) : carriedOpinion(ref, headSha))),
+            (hit) => (hit ? Stream.fromEffect(done(hit)) : Stream.succeed<OpinionEvent>({ _tag: 'Idle' })),
+          ),
+        )
+      },
+
+      DigDeeper: ({ ref, headSha, decisionId }) =>
+        progress(scope, opiner.deeper(ref, headSha, decisionId), opiner.steps(ref, headSha, decisionId), (opinion) => Effect.succeed<DeeperEvent>({ _tag: 'Done', opinion })),
+
+      SetFindingState: ({ ref, headSha, findingId, state }) =>
+        Effect.gen(function* () {
+          const { [findingId]: _, ...rest } = yield* findingStatesFor(ref, headSha)
+          yield* Effect.orDie(store.findings.set(headKey(ref, headSha), state ? { ...rest, [findingId]: state } : rest))
+        }),
 
       SetState: ({ ref, headSha, decisionId, state }) =>
         Effect.gen(function* () {
@@ -199,6 +324,24 @@ export const HandlersLive = ReviewRpcs.toLayer(
           // The sort is cached by now; without it there is nothing to carry over later.
           yield* sorter.sort(ref, headSha).pipe(Effect.flatMap((result) => keepLast(ref, headSha, result, next)), Effect.ignore)
         }),
+
+      DraftRule: Effect.fnUntraced(function* ({ ref, text }) {
+        const repoKey = repoKeyOf(ref)
+        yield* config.repo(repoKey)
+        const { review } = yield* config.settings
+        const master = `origin/${yield* git.defaultBranch(repoKey)}`
+        const guidance = review.guidance.length ? yield* git.lsTree(repoKey, master, review.guidance) : []
+        const drafted = yield* agent.structured({
+          prompt: [ruleInstructions, guidanceSection(master, guidance), `# Review comment (untrusted)\n${text}`].join('\n\n'),
+          schema: AgentRule,
+          cwd: git.dir(repoKey),
+          log: { kind: 'rule', owner: ref.owner, repo: ref.repo, number: ref.number, headSha: '' },
+        })
+        if (!inGuidance(drafted.path, review.guidance)) return yield* new AgentError({ message: `Claude picked a file outside the review guidance: ${drafted.path}` })
+        const old = yield* git.show(repoKey, master, drafted.path).pipe(Effect.orElseSucceed(() => null))
+        const rule = drafted.rule.trim()
+        return { path: drafted.path, text: rule, old, patch: appendPatch(drafted.path, old, rule), branch: ruleBranch(rule), title: ruleTitle(rule) }
+      }),
 
       Ask: ({ ref, headSha, target, question, followUp }) =>
         Stream.unwrap(
@@ -228,10 +371,18 @@ export const HandlersLive = ReviewRpcs.toLayer(
         Stream.callback<StackEvent, Effect.Error<ReturnType<typeof openStack>>>((queue) =>
           Effect.gen(function* () {
             const { stack } = yield* openStack(ref)
-            const entries: StackEntryStatus[] = stack.map((pr) => ({ pr, status: 'queued', result: null, error: null, state: {} }))
+            const entries: StackEntryStatus[] = yield* Effect.forEach(stack, (pr) =>
+              Effect.gen(function* () {
+                const prRef = { ...ref, number: pr.number }
+                const opinion = yield* opiner.cached(prRef, pr.headSha)
+                const entry: StackEntryStatus = { pr, status: 'queued', result: null, error: null, state: {} }
+                return opinion ? { ...entry, opinion, opinionStates: yield* findingStatesFor(prRef, pr.headSha) } : entry
+              }),
+            )
             let overviewResult: StackEvent['overview'] = null
             let overviewError: string | undefined
-            const emit = () => Queue.offer(queue, { entries: [...entries], overview: overviewResult, ...(overviewError ? { overviewError } : {}) })
+            let stackOpinion: StackEvent['stackOpinion']
+            const emit = () => Queue.offer(queue, { entries: [...entries], overview: overviewResult, ...(overviewError ? { overviewError } : {}), ...(stackOpinion ? { stackOpinion } : {}) })
             yield* emit()
 
             const sorted: OverviewEntry[] = []
@@ -274,9 +425,27 @@ export const HandlersLive = ReviewRpcs.toLayer(
               }
               yield* emit()
             }
+
+            if (opinionsMode(yield* config.settings) === 'automatic' && entries.every((e) => e.status === 'done') && !(yield* stackOpiner.cached(ref))) {
+              stackOpinion = { running: true }
+              yield* emit()
+              const fiber = yield* Effect.forkIn(stackOpiner.opine(ref), scope)
+              const steps = yield* Effect.forkChild(
+                Stream.runForEach(stackOpiner.steps(ref), (step) => Effect.suspend(() => ((stackOpinion = { running: true, step }), emit()))),
+              )
+              const outcome = yield* Effect.result(Fiber.join(fiber)).pipe(Effect.ensuring(Fiber.interrupt(steps)))
+              stackOpinion = outcome._tag === 'Success' ? { running: false } : { running: false, error: outcome.failure.message }
+              yield* emit()
+            }
             yield* Queue.end(queue)
           }),
         ),
+
+      StackOpinion: ({ ref, run }) => {
+        const done = (opinion: StackOpinion) => Effect.succeed<StackOpinionEvent>({ _tag: 'Done', opinion })
+        if (run) return progress(scope, stackOpiner.opine(ref), stackOpiner.steps(ref), done)
+        return Stream.unwrap(Effect.map(stackOpiner.cached(ref), (hit) => (hit ? Stream.fromEffect(done(hit)) : Stream.succeed<StackOpinionEvent>({ _tag: 'Idle' }))))
+      },
 
       Recall: ({ key }) => store.remembered.get(key).pipe(Effect.map(Option.getOrNull), Effect.orDie),
 

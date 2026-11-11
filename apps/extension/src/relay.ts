@@ -1,12 +1,14 @@
-import { CompanionUnavailable, ReviewRpcs, type Settings } from '@pr-review/domain'
+import { CompanionUnavailable, type PrRef, ReviewRpcs, type Settings } from '@pr-review/domain'
 import { makePortClient, type OnConnectLike, type PortLike, portServer } from '@pr-review/native-messaging'
-import { Deferred, Effect, Exit, Fiber, Layer, Option, Scope, Semaphore, Stream } from 'effect'
+import { Clock, Deferred, Duration, Effect, Exit, Fiber, Layer, Option, Scope, Semaphore, Stream } from 'effect'
 import type { RpcClient, RpcClientError, RpcGroup } from 'effect/rpc'
 
 /** A native port plus what Chrome said when it failed (`chrome.runtime.lastError`). */
 export type NativeConnect = () => { port: PortLike; lastError: () => string | undefined }
 
 export const IDLE = '5 minutes'
+/** How long an early start keeps the host open, so the companion can finish its run. */
+export const PREPARE_HOLD = '10 minutes'
 
 const deadPort = (): PortLike => ({
   postMessage: () => {},
@@ -23,7 +25,7 @@ type Connection = { client: Client; scope: Scope.Closeable; died: Deferred.Defer
  * opened on first use and closed `IDLE` after the last page leaves. A dead host fails calls with
  * CompanionUnavailable; the next call reconnects.
  */
-export const relay = (native: NativeConnect, pages: OnConnectLike, settings: Effect.Effect<Settings | undefined> = Effect.succeed(undefined), version?: string) =>
+export const relay = (native: NativeConnect, pages: OnConnectLike, settings: Effect.Effect<Settings | undefined> = Effect.succeed(undefined), version?: string, prepares?: { addListener: (f: (ref: PrRef) => void) => void }) =>
   Layer.unwrap(
     Effect.gen(function* () {
       const services = yield* Effect.context<never>()
@@ -32,6 +34,21 @@ export const relay = (native: NativeConnect, pages: OnConnectLike, settings: Eff
       let current: Connection | undefined
       let pageCount = 0
       let idle: Fiber.Fiber<void> | undefined
+      let holdUntil = 0
+      const hold = (ms: number) => Effect.map(Clock.currentTimeMillis, (now) => void (holdUntil = Math.max(holdUntil, now + ms)))
+      /** Closes the host when `holdUntil` passes, unless a page came back; each call replaces the pending timer. */
+      const armIdle = (ms: number) =>
+        Effect.gen(function* () {
+          yield* hold(ms)
+          if (idle) yield* Fiber.interrupt(idle)
+          idle = run(
+            Effect.suspend(() => Clock.currentTimeMillis).pipe(
+              Effect.flatMap((now) => Effect.sleep(Math.max(0, holdUntil - now))),
+              // A page may have connected while this timer was being replaced.
+              Effect.andThen(Effect.suspend(() => (current && pageCount === 0 ? close(current) : Effect.void))),
+            ),
+          )
+        })
 
       let dead: Connection[] = []
       const close = (c: Connection) =>
@@ -102,9 +119,16 @@ export const relay = (native: NativeConnect, pages: OnConnectLike, settings: Eff
         GetPr: (p) => call((c) => c.GetPr(p)),
         GetFilePatch: (p) => call((c) => c.GetFilePatch(p)),
         Sort: (p) => stream((c) => c.Sort(p)),
+        Review: (p) => stream((c) => c.Review(p)),
+        Prepare: (p) => call((c) => c.Prepare(p)),
         SetState: (p) => call((c) => c.SetState(p)),
+        Opinion: (p) => stream((c) => c.Opinion(p)),
+        DigDeeper: (p) => stream((c) => c.DigDeeper(p)),
+        SetFindingState: (p) => call((c) => c.SetFindingState(p)),
+        DraftRule: (p) => call((c) => c.DraftRule(p)),
         Ask: (p) => stream((c) => c.Ask(p)),
         Stack: (p) => stream((c) => c.Stack(p)),
+        StackOpinion: (p) => stream((c) => c.StackOpinion(p)),
         GetChats: (p) => call((c) => c.GetChats(p)),
         GetDescription: (p) => call((c) => c.GetDescription(p)),
         GetDrafts: (p) => call((c) => c.GetDrafts(p)),
@@ -114,6 +138,22 @@ export const relay = (native: NativeConnect, pages: OnConnectLike, settings: Eff
         SubmitReview: (p) => call((c) => c.SubmitReview(p)),
       })
 
+      // Early start from a PR page: best effort, no companion means nothing happens. Held open longer only for a run
+      // that started; with a page open the hold still counts once the last page leaves.
+      prepares?.addListener((ref) =>
+        run(
+          call((c) => c.Prepare({ ref })).pipe(
+            Effect.orElseSucceed(() => false),
+            Effect.flatMap((started) =>
+              Effect.suspend(() => {
+                const ms = Duration.toMillis(Duration.fromInputUnsafe(started ? PREPARE_HOLD : IDLE))
+                return pageCount === 0 ? armIdle(ms) : started ? hold(ms) : Effect.void
+              }),
+            ),
+          ),
+        ),
+      )
+
       const counted: OnConnectLike = {
         addListener: (f) =>
           pages.addListener((port) => {
@@ -121,7 +161,7 @@ export const relay = (native: NativeConnect, pages: OnConnectLike, settings: Eff
             if (idle) run(Fiber.interrupt(idle))
             port.onDisconnect.addListener(() => {
               if (--pageCount > 0) return
-              idle = run(Effect.sleep(IDLE).pipe(Effect.andThen(Effect.suspend(() => (current ? close(current) : Effect.void)))))
+              run(armIdle(Duration.toMillis(Duration.fromInputUnsafe(IDLE))))
             })
             f(port)
           }),

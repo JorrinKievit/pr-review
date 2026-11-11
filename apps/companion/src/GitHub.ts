@@ -15,6 +15,12 @@ export interface GitHubClient {
   getChecks(owner: string, repo: string, sha: string): Effect.Effect<Checks, GitHubError>
   /** The body as GitHub renders it to HTML; not cached, its media links expire after five minutes. */
   description(owner: string, repo: string, n: number): Effect.Effect<string, GitHubError>
+  /** Raw file text at `ref` (default branch when omitted); undefined when it does not exist. */
+  fileAt(owner: string, repo: string, path: string, ref?: string): Effect.Effect<string | undefined, GitHubError>
+  /** An issue's title and body; null when it is a pull request or does not exist. */
+  getIssue(owner: string, repo: string, n: number): Effect.Effect<{ title: string; body: string } | null, GitHubError>
+  /** Logins asked to review the PR (users only; a requested team does not list its members). */
+  requestedReviewers(owner: string, repo: string, n: number): Effect.Effect<ReadonlyArray<string>, GitHubError>
   /** The login the token belongs to. */
   viewer(): Effect.Effect<string, GitHubError>
   submitReview(
@@ -136,6 +142,11 @@ export const makeClient = Effect.fnUntraced(function* (octokit: Octokit) {
       }),
     ),
   )
+  const requestedReviewers = yield* cachedRead(([owner, repo, n]) =>
+    call(() => octokit.rest.pulls.listRequestedReviewers({ owner: String(owner), repo: String(repo), pull_number: Number(n) })).pipe(
+      Effect.map(({ data }) => data.users.map((u) => u.login)),
+    ),
+  )
 
   const viewer = yield* Cache.makeWith(() => call(() => octokit.rest.users.getAuthenticated()).pipe(Effect.map(({ data }) => data.login)), {
     capacity: 1,
@@ -147,7 +158,18 @@ export const makeClient = Effect.fnUntraced(function* (octokit: Octokit) {
     listOpenPrs: (owner, repo) => listOpenPrs(owner, repo),
     listThreads: (owner, repo, n) => listThreads(owner, repo, n),
     getChecks: (owner, repo, sha) => getChecks(owner, repo, sha),
+    requestedReviewers: (owner, repo, n) => requestedReviewers(owner, repo, n),
     viewer: () => Cache.get(viewer, 'me'),
+    fileAt: (owner, repo, path, ref) =>
+      call(() => octokit.request('GET /repos/{owner}/{repo}/contents/{path}', { owner, repo, path, ...(ref ? { ref } : {}), mediaType: { format: 'raw' } })).pipe(
+        Effect.map(({ data }) => (typeof data === 'string' ? data : undefined)),
+        Effect.catchIf((e) => e.status === 404, () => Effect.undefined),
+      ),
+    getIssue: (owner, repo, n) =>
+      call(() => octokit.rest.issues.get({ owner, repo, issue_number: n })).pipe(
+        Effect.map(({ data }) => (data.pull_request ? null : { title: data.title, body: data.body ?? '' })),
+        Effect.catchIf((e) => e.status === 404, () => Effect.succeed(null)),
+      ),
     description: (owner, repo, n) =>
       call(() => octokit.rest.pulls.get({ owner, repo, pull_number: n, mediaType: { format: 'html' } })).pipe(Effect.map(({ data }) => (data as { body_html?: string | null }).body_html ?? '')),
     submitReview: (owner, repo, n, r) =>

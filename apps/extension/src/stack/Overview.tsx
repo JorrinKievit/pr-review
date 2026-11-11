@@ -1,6 +1,12 @@
-import type { SortResult, StackEntryStatus, StackOverview } from '@pr-review/domain'
+import { useAtomRefresh, useAtomValue } from '@effect/atom-react'
+import { type Finding, type PrRef, rankFindings, type SortResult, type StackEntryStatus, type StackEvent, type StackOverview } from '@pr-review/domain'
+import { AsyncResult } from 'effect/reactivity'
+import { useEffect, useRef, useState } from 'react'
+import { useAtoms } from '../atoms.ts'
 import { cn } from '../lib/utils.ts'
-import { Spinner, Working } from '../ui/index.tsx'
+import { failureOf } from '../result.ts'
+import { SeverityPill } from '../review/Findings.tsx'
+import { Button, Spinner, Working } from '../ui/index.tsx'
 
 const panels = [
   ['tables', 'Tables'],
@@ -32,11 +38,14 @@ export function PrLine({ entry }: { entry: StackEntryStatus }) {
 
 /** The stack at a glance: every PR bottom to top with what it does, then what the whole stack changes. */
 export function Overview(props: {
+  prRef: PrRef
   entries: ReadonlyArray<StackEntryStatus>
   overview: StackOverview | null
   overviewError?: string | undefined
+  stackOpinion?: StackEvent['stackOpinion']
   progress: (pr: number) => { decided: number; total: number }
   onOpen: (pr: number) => void
+  onOpenDecision: (pr: number, decisionId: string) => void
 }) {
   const results: SortResult[] = props.entries.flatMap((e) => (e.result ? [e.result] : []))
   const pending = props.entries.some((e) => e.status === 'queued' || e.status === 'running')
@@ -67,6 +76,7 @@ export function Overview(props: {
                   <span className="mt-0.5 block text-sm text-muted-foreground">
                     <PrLine entry={e} />
                   </span>
+                  {e.status === 'done' && !e.opinion && <span className="mt-0.5 block text-sm text-dim">No opinion yet</span>}
                 </span>
                 <span className={cn('mt-0.5 shrink-0 text-sm tabular-nums', e.status === 'done' && total && decided === total ? 'text-ok' : 'text-muted-foreground')}>
                   {e.status === 'done' ? (total ? `${decided} / ${total}` : 'nothing to review') : e.status === 'running' ? 'sorting' : e.status}
@@ -76,6 +86,7 @@ export function Overview(props: {
           )
         })}
       </ol>
+      <StackFindings prRef={props.prRef} stackOpinion={props.stackOpinion} entries={props.entries} onOpen={props.onOpen} onOpenDecision={props.onOpenDecision} />
       {overview ? (
         <>
           <h2 className="mb-2 text-lg font-medium">What the stack changes</h2>
@@ -124,4 +135,79 @@ export function Overview(props: {
       </p>
     </article>
   )
+}
+
+/** Judge the stack (never PR opinions), then one ranked list: the stack's findings and every cached PR opinion's. */
+function StackFindings(props: { prRef: PrRef; stackOpinion?: StackEvent['stackOpinion']; entries: ReadonlyArray<StackEntryStatus>; onOpen: (pr: number) => void; onOpenDecision: (pr: number, decisionId: string) => void }) {
+  const { stackOpinionAtom } = useAtoms()
+  const [running, setRunning] = useState(false)
+  const cachedAtom = stackOpinionAtom(props.prRef, false)
+  const cached = useAtomValue(cachedAtom)
+  const refreshCached = useAtomRefresh(cachedAtom)
+  const auto = props.stackOpinion
+  const wasRunning = useRef(false)
+  useEffect(() => {
+    if (wasRunning.current && !auto?.running && !auto?.error) refreshCached()
+    wasRunning.current = !!auto?.running
+  }, [auto?.running, auto?.error, refreshCached])
+  const stackFindings = AsyncResult.isSuccess(cached) && cached.value._tag === 'Done' ? cached.value.opinion.findings : []
+  const pending = (running || !!auto?.running) && !(AsyncResult.isSuccess(cached) && cached.value._tag === 'Done')
+  const all: Finding[] = [
+    ...stackFindings,
+    ...props.entries.flatMap((e) => e.opinion?.decisions.flatMap((d) => d.findings.filter((f) => e.opinionStates?.[f.id] !== 'dismissed')) ?? []),
+  ]
+  const rows = rankFindings(all, props.entries.map((e) => e.pr.number))
+  const fromStack = new Set(stackFindings)
+  return (
+    <section aria-label="Claude's findings section" className="mb-6">
+      <div className="mb-2 flex items-center gap-3">
+        <h2 className="text-lg font-medium">Claude's findings</h2>
+        {auto?.running ? <Working step={`Judging the stack: ${auto.step ?? 'reading the stack'}`} /> : running ? <Judging prRef={props.prRef} /> : (
+          <Button size="xs" variant="outline" onClick={() => setRunning(true)}>
+            Judge the stack
+          </Button>
+        )}
+        {auto?.error && !auto.running && <span className="text-destructive">The stack judgement failed: {auto.error}</span>}
+      </div>
+      {rows.length === 0 ? (
+        !pending && <p className="text-muted-foreground">No findings yet.</p>
+      ) : (
+        <ul aria-label="Claude's findings" className="flex flex-col gap-1">
+          {rows.map((f) => (
+            <li key={`${f.pr}:${f.id}`}>
+              <button
+                type="button"
+                onClick={() => (fromStack.has(f) || f.decisionId === null ? props.onOpen(f.pr) : props.onOpenDecision(f.pr, f.decisionId))}
+                className="flex w-full flex-col gap-0.5 rounded-md px-3 py-2 text-left hover:bg-accent/60"
+              >
+                <span className="flex min-w-0 items-center gap-1.5">
+                  <SeverityPill severity={f.severity} />
+                  <span className="text-dim">#{f.pr}</span>
+                  <b className="min-w-0 truncate font-medium">{f.title}</b>
+                </span>
+                <span className="text-muted-foreground">{f.take}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  )
+}
+
+function Judging({ prRef }: { prRef: PrRef }) {
+  const atom = useAtoms().stackOpinionAtom(prRef, true)
+  const result = useAtomValue(atom)
+  const retry = useAtomRefresh(atom)
+  if (AsyncResult.isFailure(result))
+    return (
+      <span className="flex items-center gap-1.5 text-destructive">
+        {String((failureOf(result) as { message?: string } | undefined)?.message ?? 'The judgement failed')}
+        <Button size="xs" variant="outline" onClick={retry}>
+          Try again
+        </Button>
+      </span>
+    )
+  const e = AsyncResult.isSuccess(result) ? result.value : undefined
+  return e?._tag === 'Running' ? <Working step={e.step} startedAt={e.startedAt} /> : e?._tag === 'Done' ? null : <Working />
 }

@@ -43,6 +43,10 @@ export const makeAtoms = (client: Client) => {
   const descriptions = Atom.family((key: string) => client.runtime.atom(Effect.flatMap(rpc, (c) => c('GetDescription', { ref: parse(key) }))).pipe(Atom.setIdleTTL('10 seconds')))
   const recall = Atom.family((key: string) => client.runtime.atom(Effect.flatMap(rpc, (c) => c('Recall', { key }))).pipe(Atom.setIdleTTL('5 minutes')))
   const drafts = Atom.family((key: string) => client.runtime.atom(Effect.flatMap(rpc, (c) => c('GetDrafts', { ref: parse(key) }))).pipe(Atom.keepAlive))
+  const rules = Atom.family((key: string) => {
+    const { ref, text } = JSON.parse(key) as { ref: PrRef; text: string }
+    return client.runtime.atom(Effect.flatMap(rpc, (c) => c('DraftRule', { ref, text }))).pipe(Atom.setIdleTTL('1 minute'))
+  })
   const chats = Atom.family((key: string) => {
     const [ref, headSha] = key.split('@') as [string, string]
     return client.runtime.atom(Effect.flatMap(rpc, (c) => c('GetChats', { ref: parse(ref), headSha }))).pipe(Atom.setIdleTTL('5 minutes'))
@@ -101,6 +105,8 @@ export const makeAtoms = (client: Client) => {
     findingStateAtom: client.runtime.fn((a: { ref: PrRef; headSha: string; findingId: string; state: FindingState | null }, get) =>
       Effect.flatMap(rpc, (c) => c('SetFindingState', a)).pipe(Effect.tap(() => Effect.sync(() => get.refresh(cachedOpinion(refKey(a.ref), a.headSha))))),
     ),
+    /** The rule Claude drafts from a review comment; read when the dialog opens, nothing is written. */
+    ruleAtom: (ref: PrRef, text: string) => rules(JSON.stringify({ ref, text })),
     /** Saved conversations for a head; refreshed whenever an answer finishes. */
     chatsAtom,
     /** The question being answered for a key (a line range or a decision), with the answer so far. Kept alive so closing the panel doesn't abort a paid answer. */

@@ -38,6 +38,8 @@ export function FileDiffView(props: {
   previous?: string | undefined
   ranges: ReadonlyArray<LineRange>
   threads: ReadonlyArray<Thread>
+  /** The signed-in login; its comments can become rules. */
+  viewer: string
   collapsed?: boolean
   onToggle?: () => void
   /** Shown instead of the diff when there is none. */
@@ -126,7 +128,7 @@ export function FileDiffView(props: {
         renderAnnotation={({ metadata: n }) => (
           <>
             {n.github.map((comments) => (
-              <GitHubThread key={comments[0]!.id} comments={comments} />
+              <GitHubThread key={comments[0]!.id} prRef={props.prRef} viewer={props.viewer} comments={comments} />
             ))}
             {n.drafts.map((d) => (
               <DraftNote key={d.id} prRef={props.prRef} draft={d} />

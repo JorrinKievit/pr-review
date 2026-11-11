@@ -106,6 +106,7 @@ export const relay = (native: NativeConnect, pages: OnConnectLike, settings: Eff
         Opinion: (p) => stream((c) => c.Opinion(p)),
         DigDeeper: (p) => stream((c) => c.DigDeeper(p)),
         SetFindingState: (p) => call((c) => c.SetFindingState(p)),
+        DraftRule: (p) => call((c) => c.DraftRule(p)),
         Ask: (p) => stream((c) => c.Ask(p)),
         Stack: (p) => stream((c) => c.Stack(p)),
         StackOpinion: (p) => stream((c) => c.StackOpinion(p)),

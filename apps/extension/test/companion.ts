@@ -25,6 +25,7 @@ export const fakeCompanion = (o: { sortEvents?: ReadonlyArray<SortEvent>; onSort
     Opinion: () => Stream.make({ _tag: 'Idle' as const }),
     DigDeeper: () => Stream.never,
     SetFindingState: unused,
+    DraftRule: unused,
     Ask: () => Stream.die('unused'),
     Stack: () => Stream.die('unused'),
     StackOpinion: () => Stream.make({ _tag: 'Idle' as const }),

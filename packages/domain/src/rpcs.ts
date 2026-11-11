@@ -2,7 +2,7 @@ import { Schema } from 'effect'
 import { Rpc, RpcGroup } from 'effect/rpc'
 import { AgentError, CompanionUnavailable, ReviewRejected, GitError, GitHubError, RepoNotConfigured } from './errors.ts'
 import { AskEvent, AskTarget, Chat, DecisionState, Draft, PrRef, PrView, SortEvent, StackEvent } from './schemas.ts'
-import { DeeperEvent, FindingState, OpinionEvent, StackOpinionEvent } from './opinion.ts'
+import { DeeperEvent, FindingState, OpinionEvent, RuleDraft, StackOpinionEvent } from './opinion.ts'
 import { AccountStatus, Settings } from './settings.ts'
 
 // CompanionUnavailable is raised by the extension's background when the native host is missing or gone.
@@ -48,6 +48,12 @@ export class ReviewRpcs extends RpcGroup.make(
   Rpc.make('SetFindingState', {
     payload: { ref: PrRef, headSha: Schema.String, findingId: Schema.String, state: Schema.NullOr(FindingState) },
     error: CompanionUnavailable,
+  }),
+  /** A review comment turned into a proposed rule for the repo's review guidance; nothing is written. */
+  Rpc.make('DraftRule', {
+    payload: { ref: PrRef, text: Schema.String },
+    success: RuleDraft,
+    error: Schema.Union([RepoNotConfigured, GitError, AgentError, CompanionUnavailable]),
   }),
   Rpc.make('Ask', {
     payload: { ref: PrRef, headSha: Schema.String, target: AskTarget, question: Schema.String, followUp: Schema.Boolean },

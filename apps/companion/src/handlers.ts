@@ -1,4 +1,5 @@
-import { type DecisionState, type DeeperEvent, type DecisionStates, type Draft, type FindingStates, type OpinionEvent, type PrOpinion, type PrRef, type Rereview, ReviewRpcs, type SortResult, type SortEvent, type StackEntry, type StackEntryStatus, type StackEvent, type StackOpinion, type StackOpinionEvent, targetKey } from '@pr-review/domain'
+import { AgentError, AgentRule, appendPatch, inGuidance, ruleBranch, ruleTitle, type DecisionState, type DeeperEvent, type DecisionStates, type Draft, type FindingStates, type OpinionEvent, type PrOpinion, type PrRef, type Rereview, ReviewRpcs, type SortResult, type SortEvent, type StackEntry, type StackEntryStatus, type StackEvent, type StackOpinion, type StackOpinionEvent, targetKey } from '@pr-review/domain'
+import { readFileSync } from 'node:fs'
 import { Cause, Clock, Effect, Exit, Fiber, Layer, Option, Queue, type Scope, Stream } from 'effect'
 import { RpcMiddleware } from 'effect/rpc'
 import { PersistedCache } from 'effect/persistence'
@@ -9,11 +10,14 @@ import { Git } from './Git.ts'
 import { GitHub } from './GitHub.ts'
 import { sameChange } from './interdiff.ts'
 import { Opiner } from './Opiner.ts'
+import { guidanceSection } from './opinionContext.ts'
 import { Overview } from './Overview.ts'
 import { Sorter } from './Sorter.ts'
 import { buildStack } from './stack.ts'
 import { StackOpiner } from './StackOpiner.ts'
 import { cacheOptions, type Chats, type OverviewEntry, PatchKey, Store, storeFailuresDie } from './Store.ts'
+
+const ruleInstructions = readFileSync(new URL('../prompts/rule.md', import.meta.url), 'utf8')
 
 /** Set by the release bundle; 0.0.0 is a companion run from source. */
 export const VERSION = process.env.PR_REVIEW_VERSION ?? '0.0.0'
@@ -233,6 +237,24 @@ export const HandlersLive = ReviewRpcs.toLayer(
           // The sort is cached by now; without it there is nothing to carry over later.
           yield* sorter.sort(ref, headSha).pipe(Effect.flatMap((result) => keepLast(ref, headSha, result, next)), Effect.ignore)
         }),
+
+      DraftRule: Effect.fnUntraced(function* ({ ref, text }) {
+        const repoKey = repoKeyOf(ref)
+        yield* config.repo(repoKey)
+        const { review } = yield* config.settings
+        const master = `origin/${yield* git.defaultBranch(repoKey)}`
+        const guidance = review.guidance.length ? yield* git.lsTree(repoKey, master, review.guidance) : []
+        const drafted = yield* agent.structured({
+          prompt: [ruleInstructions, guidanceSection(master, guidance), `# Review comment (untrusted)\n${text}`].join('\n\n'),
+          schema: AgentRule,
+          cwd: git.dir(repoKey),
+          log: { kind: 'rule', owner: ref.owner, repo: ref.repo, number: ref.number, headSha: '' },
+        })
+        if (!inGuidance(drafted.path, review.guidance)) return yield* new AgentError({ message: `Claude picked a file outside the review guidance: ${drafted.path}` })
+        const old = yield* git.show(repoKey, master, drafted.path).pipe(Effect.orElseSucceed(() => null))
+        const rule = drafted.rule.trim()
+        return { path: drafted.path, text: rule, old, patch: appendPatch(drafted.path, old, rule), branch: ruleBranch(rule), title: ruleTitle(rule) }
+      }),
 
       Ask: ({ ref, headSha, target, question, followUp }) =>
         Stream.unwrap(

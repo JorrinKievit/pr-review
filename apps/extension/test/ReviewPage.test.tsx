@@ -14,6 +14,7 @@ import {
   ReviewRejected,
   type Decision,
   type PrView,
+  type RuleDraft,
   type SortEvent,
   type SortResult,
 } from '@pr-review/domain'
@@ -98,6 +99,15 @@ const ref = { host: 'github.com', owner: 'acme', repo: 'core', number: 7 }
 const scopes: Scope.Closeable[] = []
 afterEach(() => scopes.splice(0).forEach((s) => Effect.runFork(Scope.close(s, Exit.void))))
 
+const ruleDraft: RuleDraft = {
+  path: 'AGENTS.md',
+  text: '- Reuse the shared client.',
+  old: '# Rules\n\n- one\n',
+  patch: 'unused',
+  branch: 'rules/reuse-the-shared-client',
+  title: 'Review rule: Reuse the shared client.',
+}
+
 const renderPage = (
   o: {
     sort?: Stream.Stream<SortEvent>
@@ -116,6 +126,7 @@ const renderPage = (
   let findingStates: FindingStates = {}
   const opinionRuns: boolean[] = []
   const stateCalls: unknown[] = []
+  const ruleTexts: string[] = []
   const doneEvent = (opinion: PrOpinion): OpinionEvent => ({ _tag: 'Done', opinion, states: findingStates })
   const reviews: unknown[] = []
   const chats: Chat[] = [...(o.chats ?? [])]
@@ -166,6 +177,7 @@ const renderPage = (
             }),
           ),
         ),
+      DraftRule: ({ text }) => Effect.sync(() => (ruleTexts.push(text), ruleDraft)),
       SetFindingState: (p) =>
         Effect.sync(() => {
           stateCalls.push(p)
@@ -192,7 +204,7 @@ const renderPage = (
       </AtomsContext.Provider>
     </RegistryProvider>,
   )
-  return { setStates, patches, bases, drafts: () => drafts, reviews, opinionRuns, stateCalls }
+  return { setStates, patches, bases, drafts: () => drafts, reviews, opinionRuns, stateCalls, ruleTexts }
 }
 
 const heading = (name: string) => screen.findByRole('heading', { name }, { timeout: 3000 })
@@ -646,4 +658,37 @@ test('stack moved line offers a re-run', async () => {
   await waitFor(() => expect(opinionRuns).toContain(true))
   await waitFor(() => expect(screen.queryByText('The stack moved since this opinion.')).toBeNull())
   expect(opinionRuns.filter((r) => r)).toEqual([true])
+})
+
+test('Make it a rule on a posted finding shows the drafted patch', async () => {
+  const { ruleTexts } = renderPage({ opinion: { cached: opinion } })
+  await openDecisionOne()
+  const shared = screen.getByRole('region', { name: 'Use the shared client' })
+  expect(within(shared).queryByRole('button', { name: 'Make it a rule' })).toBeNull()
+  await userEvent.click(within(shared).getByRole('button', { name: 'Use as comment' }))
+  await userEvent.click(await within(shared).findByRole('button', { name: 'Make it a rule' }))
+  const dialog = await within(shared).findByRole('dialog', { name: 'Make it a rule' }, { timeout: 3000 })
+  expect(ruleTexts).toEqual([expect.stringContaining('Use the shared client')])
+  const patchText = () => within(dialog).getByLabelText('Patch').textContent
+  await waitFor(() => expect(patchText()).toContain('+- Reuse the shared client.'))
+  expect(patchText()).toContain('--- a/AGENTS.md')
+  expect(within(dialog).getByText('rules/reuse-the-shared-client')).toBeInTheDocument()
+  expect(within(dialog).queryByText('Patch assumes a new file')).toBeNull()
+  await userEvent.type(within(dialog).getByLabelText('Rule'), ' Always.')
+  expect(patchText()).toContain('+- Reuse the shared client. Always.')
+  await userEvent.clear(within(dialog).getByLabelText('File'))
+  await userEvent.type(within(dialog).getByLabelText('File'), '.agents/api.md')
+  expect(within(dialog).getByText('Patch assumes a new file')).toBeInTheDocument()
+  expect(patchText()).toContain('--- /dev/null')
+})
+
+test('Make it a rule is offered on the reviewer\'s own line comments only', async () => {
+  const t = (id: number, author: string) => ({ id, path: 'api.ts', line: 2, side: 'RIGHT' as const, author, body: `by ${author}`, inReplyTo: null, createdAt: '2026-10-30T10:00:00Z' })
+  const { ruleTexts } = renderPage({ getPr: () => Effect.succeed({ ...pr, threads: [t(1, 'jorrin'), t(2, 'kees')] }) })
+  await heading('Decision one')
+  const buttons = await screen.findAllByRole('button', { name: 'Make it a rule' })
+  expect(buttons).toHaveLength(1)
+  await userEvent.click(buttons[0]!)
+  expect(await screen.findByRole('dialog', { name: 'Make it a rule' }, { timeout: 3000 })).toBeInTheDocument()
+  expect(ruleTexts).toEqual(['by jorrin'])
 })

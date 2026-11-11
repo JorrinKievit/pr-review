@@ -437,4 +437,44 @@ describe('handlers', () => {
       assert.deepStrictEqual(tags(yield* Stream.runCollect(c.StackOpinion({ ref, run: false }))), ['Done'])
       assert.deepStrictEqual(agent.calls.map((x) => x.log.kind), ['stack-opinion'])
     }).pipe(Effect.scoped))
+
+  const ruleClient = (reply: { path: string; rule: string }, fg = fakeGit({ rules: ['AGENTS.md'], show: { 'origin/master:AGENTS.md': '# Rules\n\n- one\n' } })) => {
+    const agent = fakeAgent(() => Effect.succeed(reply))
+    const deps = Layer.mergeAll(agent.layer, fg.layer, fakeGitHub(), configLayer())
+    const services = Layer.mergeAll(StackOpiner.layer, Asker.layer, Overview.layer).pipe(Layer.provideMerge(Opiner.layer), Layer.provideMerge(Layer.mergeAll(Sorter.layer, Tickets.layer)), Layer.provideMerge(Store.layerWith(KeyValueStore.layerMemory)), Layer.provideMerge(deps))
+    const client = Effect.flatMap(Layer.build(Layer.merge(HandlersLive.pipe(Layer.provide(services)), LoggedLive)), (ctx) => RpcTest.makeClient(CompanionRpcs).pipe(Effect.provideContext(ctx)))
+    return { agent, client }
+  }
+
+  it.effect('DraftRule drafts a patch for a file in the guidance', () =>
+    Effect.gen(function* () {
+      const { agent, client } = ruleClient({ path: 'AGENTS.md', rule: '- Name timeouts. Always.\n' })
+      const draft = yield* Effect.flatMap(client, (c) => c.DraftRule({ ref, text: 'name your timeouts' }))
+      assert.strictEqual(draft.path, 'AGENTS.md')
+      assert.strictEqual(draft.old, '# Rules\n\n- one\n')
+      assert.include(draft.patch, '+- Name timeouts. Always.')
+      assert.strictEqual(draft.branch, 'rules/name-timeouts-always')
+      assert.strictEqual(draft.title, 'Review rule: Name timeouts.')
+      assert.include(agent.calls[0]!.prompt, 'AGENTS.md')
+      assert.include(agent.calls[0]!.prompt, 'name your timeouts')
+    }),
+  )
+
+  it.effect('DraftRule rejects a path outside the guidance', () =>
+    Effect.gen(function* () {
+      const { client } = ruleClient({ path: 'src/secret.ts', rule: '- x' })
+      const err = yield* Effect.flip(Effect.flatMap(client, (c) => c.DraftRule({ ref, text: 'x' })))
+      assert.strictEqual(err._tag, 'AgentError')
+      assert.include((err as AgentError).message, 'outside the review guidance: src/secret.ts')
+    }),
+  )
+
+  it.effect('DraftRule creates the file when it is not at the default branch', () =>
+    Effect.gen(function* () {
+      const { client } = ruleClient({ path: 'AGENTS.md', rule: '- x' }, fakeGit({ rules: [], show: {} }))
+      const draft = yield* Effect.flatMap(client, (c) => c.DraftRule({ ref, text: 'x' }))
+      assert.strictEqual(draft.old, null)
+      assert.include(draft.patch, '--- /dev/null')
+    }),
+  )
 })

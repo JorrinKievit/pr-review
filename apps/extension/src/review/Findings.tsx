@@ -7,6 +7,7 @@ import { cn } from '../lib/utils.ts'
 import { failureOf } from '../result.ts'
 import { Button, Pill, Working } from '../ui/index.tsx'
 import { useDrafts } from './drafts.ts'
+import { RuleDialog } from './RuleDialog.tsx'
 
 export const severityLabel: Record<Severity, string> = { blocks: 'Blocks merge', should: 'Should fix', ask: 'Worth asking' }
 const severityShort: Record<Severity, string> = { blocks: 'Blocks', should: 'Should fix', ask: 'Ask' }
@@ -132,6 +133,7 @@ function FindingCard(props: { prRef: PrRef; headSha: string; finding: Finding; s
   const f = props.finding
   const setState = useFindingState(props.prRef, props.headSha)
   const { add } = useDrafts(props.prRef)
+  const [ruling, setRuling] = useState(false)
   const post = () => {
     if (!f.anchor || !f.comment) return
     add({ path: f.anchor.path, line: f.anchor.line, side: 'RIGHT', body: f.comment })
@@ -170,7 +172,12 @@ function FindingCard(props: { prRef: PrRef; headSha: string; finding: Finding; s
       )}
       <div className="mt-2 flex items-center gap-1.5">
         {props.states[f.id] === 'posted' ? (
-          <span className="text-sm text-ok">In your review</span>
+          <>
+            <span className="text-sm text-ok">In your review</span>
+            <Button size="xs" variant="ghost" onClick={() => setRuling(true)}>
+              Make it a rule
+            </Button>
+          </>
         ) : (
           <>
             {f.anchor && f.comment && (
@@ -184,6 +191,7 @@ function FindingCard(props: { prRef: PrRef; headSha: string; finding: Finding; s
           </>
         )}
       </div>
+      {ruling && <RuleDialog prRef={props.prRef} text={`${f.title}. ${f.comment ?? f.take}`} onClose={() => setRuling(false)} />}
     </section>
   )
 }

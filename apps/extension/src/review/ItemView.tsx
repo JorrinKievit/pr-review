@@ -222,6 +222,7 @@ export function ItemView(props: {
             previous={pr.files.find((f) => f.path === path)?.previous}
             ranges={rangesFor(path)}
             threads={pr.threads}
+            viewer={pr.viewer}
             collapsed={collapsed.has(path)}
             onToggle={() => toggle(path)}
             {...(base !== pr.mergeBase ? { empty: 'unchanged since your review' } : {})}

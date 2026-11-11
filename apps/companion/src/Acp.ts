@@ -14,6 +14,9 @@ export type AcpUpdate = { readonly _tag: 'Text'; readonly delta: string } | { re
 /** One agent session on one account. Each prompt streams until the agent ends its turn. */
 export interface AcpSession {
   readonly sessionId: string
+  /** The agent's own model before the account's was set, when the agent says. */
+  readonly defaultModel: string | undefined
+  setModel(model: string): Effect.Effect<void, AgentError>
   prompt(text: string): Stream.Stream<AcpUpdate, AgentError>
 }
 
@@ -121,11 +124,21 @@ export class Acp extends Context.Service<Acp, { open(account: AgentAccount, cwd:
             const mode = account.mode ?? READ_ONLY_MODES.map((r) => modes?.find((m) => r.test(m.id))?.id).find(Boolean)
             if (mode && mode !== ('modes' in session ? session.modes?.currentModeId : undefined))
               yield* call(() => agent.request(acp.methods.agent.session.setMode, { sessionId, modeId: mode }))
-            if (account.model) yield* call(() => agent.request(acp.methods.agent.session.setConfigOption, { sessionId, configId: 'model', value: account.model! }))
+            const options = (session as { configOptions?: ReadonlyArray<acp.SessionConfigOption> | null }).configOptions
+            const current = options?.find((c) => c.id === 'model')?.currentValue
+            const defaultModel = typeof current === 'string' ? current : undefined
+            let model = defaultModel
+            const setModel = (value: string): Effect.Effect<void, AgentError> =>
+              Effect.suspend(() =>
+                value === model ? Effect.void : call(() => agent.request(acp.methods.agent.session.setConfigOption, { sessionId, configId: 'model', value })).pipe(Effect.map(() => void (model = value))),
+              )
+            if (account.model) yield* setModel(account.model)
 
             const steps = new Set<string>()
             return {
               sessionId,
+              defaultModel,
+              setModel,
               prompt: (text) =>
                 Stream.unwrap(
                   Effect.gen(function* () {

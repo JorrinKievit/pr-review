@@ -28,7 +28,11 @@ const fakeAgent = (o: { turn?: (say: Say, ask: Ask, text: string) => Promise<acp
     .onRequest(acp.methods.agent.session.new, (ctx) => {
       seen.meta.push(ctx.params._meta)
       if (o.needsLogin && !loggedIn) throw acp.RequestError.authRequired()
-      return { sessionId: 'S1', modes: { currentModeId: 'agent', availableModes: [{ id: 'agent', name: 'Agent' }, { id: 'read-only', name: 'Read only' }] } }
+      return {
+        sessionId: 'S1',
+        modes: { currentModeId: 'agent', availableModes: [{ id: 'agent', name: 'Agent' }, { id: 'read-only', name: 'Read only' }] },
+        configOptions: [{ type: 'select', id: 'model', name: 'Model', currentValue: 'default', options: [{ value: 'default', name: 'Default' }] }],
+      }
     })
     .onRequest(acp.methods.agent.session.resume, (ctx) => {
       seen.resumed.push(ctx.params.sessionId)
@@ -150,6 +154,14 @@ describe('Acp', () => {
       yield* run(chosen, () => Effect.void, { ...account, mode: 'agent', model: 'big' })
       assert.deepStrictEqual(chosen.seen.modes, [])
       assert.deepStrictEqual(chosen.seen.models, ['big'])
+    }))
+
+  it.live('switches model only when it changes, and knows the agent default', () =>
+    Effect.gen(function* () {
+      const agent = fakeAgent()
+      const defaults = yield* run(agent, (s) => Effect.as(Effect.all([s.setModel('big'), s.setModel('quick'), s.setModel('quick'), s.setModel('big')]), s.defaultModel), { ...account, model: 'big' })
+      assert.strictEqual(defaults, 'default')
+      assert.deepStrictEqual(agent.seen.models, ['big', 'quick', 'big'])
     }))
 
   it.live('logs in with the agent’s own login when it asks, never with an API key', () =>

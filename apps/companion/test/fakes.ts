@@ -1,4 +1,4 @@
-import { AgentError, type AgentSort, defaultSettings, type FileStat, GitError, type PrMeta, type StackOverview } from '@pr-review/domain'
+import { type AgentAccount, AgentError, type AgentSort, defaultSettings, type FileStat, GitError, type PrMeta, type StackOverview } from '@pr-review/domain'
 import { Effect, Layer, Schema, Stream } from 'effect'
 import { Agent } from '../src/Agent.ts'
 import { Config } from '../src/Config.ts'
@@ -10,26 +10,41 @@ export const repoKey = 'h/o/r'
 
 export const configLayer = (cacheRoot = '/cache') => Config.layerTest({ cacheRoot, settings: { ...defaultSettings, hosts: [ref.host] } })
 
-export type AgentCall = { prompt: string; cwd: string; related?: ReadonlyArray<string>; prefer?: 'deep'; resume?: string; log: { kind: string; number: number } }
+/** Session turns carry their index in the session (from 0) and the model asked for. */
+export type AgentCall = { prompt: string; cwd: string; related?: ReadonlyArray<string>; prefer?: 'deep'; resume?: string; log: { kind: string; number: number }; turn?: number; model?: 'fast' | 'main' }
 
-/** An Agent whose structured runs answer with `reply()`, streaming runs emit `Hi` then Done, and ticket runs answer with `ticket()` (default: no ticket account). */
+export const fakeAccount: AgentAccount = { id: 'fake', name: 'Fake', agent: 'custom', command: 'x', env: {}, concurrency: 1, enabled: true }
+
+/** An Agent whose structured runs and session turns answer with `reply()`, streaming runs emit `Hi` then Done, and ticket runs answer with `ticket()` (default: no ticket account). */
 export const fakeAgent = (
   reply: (call: AgentCall) => Effect.Effect<unknown, any> = () => Effect.succeed({ decisions: [], skim: [], claims: [] } satisfies AgentSort),
   ticket: (prompt: string) => Effect.Effect<string, AgentError> = () => Effect.fail(new AgentError({ message: 'No AI account is set to read tickets' })),
 ) => {
   const calls: AgentCall[] = []
   const ticketPrompts: string[] = []
+  const answer = (call: AgentCall, onStep: ((s: string) => Effect.Effect<void>) | undefined, schema: Schema.Top) =>
+    Effect.suspend(() => {
+      calls.push(call)
+      return (onStep?.('Searching for "x"') ?? Effect.void).pipe(
+        Effect.andThen(reply(call)),
+        Effect.flatMap((x) => Effect.orDie(Schema.decodeUnknownEffect(schema as Schema.Codec<unknown>)(x))),
+      )
+    })
   const layer = Layer.succeed(
     Agent,
     Agent.of({
-      structured: (o) =>
-        Effect.suspend(() => {
-          calls.push(o)
-          return (o.onStep?.('Searching for "x"') ?? Effect.void).pipe(
-            Effect.andThen(reply(o)),
-            Effect.flatMap((x) => Effect.orDie(Schema.decodeUnknownEffect(o.schema)(x))),
-          )
-        }) as never,
+      structured: (o) => answer(o, o.onStep, o.schema) as never,
+      session: (o, use) => {
+        let turn = 0
+        return use(
+          {
+            structured: (prompt, schema, model = 'main', turnKind) =>
+              answer({ ...o, prompt, turn: turn++, model, log: turnKind ? { ...o.log, kind: turnKind } : o.log }, o.onStep, schema) as never,
+          },
+          fakeAccount,
+        )
+      },
+      idle: () => Effect.succeed([]),
       streaming: (o) =>
         Stream.suspend(() => {
           calls.push(o)

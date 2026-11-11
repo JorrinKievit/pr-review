@@ -14,6 +14,7 @@ import { Opiner } from '../src/Opiner.ts'
 import { Overview } from '../src/Overview.ts'
 import { Sorter } from '../src/Sorter.ts'
 import { Store } from '../src/Store.ts'
+import { Tickets } from '../src/Tickets.ts'
 import { configLayer, fakeAgent, fakeGit, fakeGitHub, overviewReply, pr, ref } from './fakes.ts'
 import { git, makeRemote, tmp } from './helpers.ts'
 import { TestClock } from 'effect/testing'
@@ -61,7 +62,7 @@ const setup = (
   )
   const deps = Layer.mergeAll(agent.layer, (o.git ?? fakeGit({ files: o.files ?? files, diff: o.diff ?? 'd' })).layer, fakeGitHub({ listOpenPrs: () => Effect.succeed([entry(7, 'master', 'feat')]), ...o.github }), configLayer())
   const store = Store.layerWith(KeyValueStore.layerMemory)
-  const services = Layer.mergeAll(Opiner.layer, Asker.layer, Overview.layer).pipe(Layer.provideMerge(Sorter.layer), Layer.provideMerge(store), Layer.provideMerge(deps))
+  const services = Layer.mergeAll(Opiner.layer, Asker.layer, Overview.layer).pipe(Layer.provideMerge(Layer.mergeAll(Sorter.layer, Tickets.layer)), Layer.provideMerge(store), Layer.provideMerge(deps))
   const layer = HandlersLive.pipe(Layer.provide(services))
   // Built in the test's scope, like the companion's process scope: the handlers outlive each client call.
   const client = Effect.flatMap(Layer.build(Layer.merge(layer, LoggedLive)), (ctx) => RpcTest.makeClient(CompanionRpcs).pipe(Effect.provideContext(ctx)))

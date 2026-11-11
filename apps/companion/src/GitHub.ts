@@ -17,6 +17,8 @@ export interface GitHubClient {
   description(owner: string, repo: string, n: number): Effect.Effect<string, GitHubError>
   /** Raw file text at `ref` (default branch when omitted); undefined when it does not exist. */
   fileAt(owner: string, repo: string, path: string, ref?: string): Effect.Effect<string | undefined, GitHubError>
+  /** An issue's title and body; null when it is a pull request or does not exist. */
+  getIssue(owner: string, repo: string, n: number): Effect.Effect<{ title: string; body: string } | null, GitHubError>
   /** The login the token belongs to. */
   viewer(): Effect.Effect<string, GitHubError>
   submitReview(
@@ -154,6 +156,11 @@ export const makeClient = Effect.fnUntraced(function* (octokit: Octokit) {
       call(() => octokit.request('GET /repos/{owner}/{repo}/contents/{path}', { owner, repo, path, ...(ref ? { ref } : {}), mediaType: { format: 'raw' } })).pipe(
         Effect.map(({ data }) => (typeof data === 'string' ? data : undefined)),
         Effect.catchIf((e) => e.status === 404, () => Effect.undefined),
+      ),
+    getIssue: (owner, repo, n) =>
+      call(() => octokit.rest.issues.get({ owner, repo, issue_number: n })).pipe(
+        Effect.map(({ data }) => (data.pull_request ? null : { title: data.title, body: data.body ?? '' })),
+        Effect.catchIf((e) => e.status === 404, () => Effect.succeed(null)),
       ),
     description: (owner, repo, n) =>
       call(() => octokit.rest.pulls.get({ owner, repo, pull_number: n, mediaType: { format: 'html' } })).pipe(Effect.map(({ data }) => (data as { body_html?: string | null }).body_html ?? '')),

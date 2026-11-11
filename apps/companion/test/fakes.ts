@@ -1,4 +1,4 @@
-import { type AgentSort, defaultSettings, type FileStat, GitError, type PrMeta, type StackOverview } from '@pr-review/domain'
+import { AgentError, type AgentSort, defaultSettings, type FileStat, GitError, type PrMeta, type StackOverview } from '@pr-review/domain'
 import { Effect, Layer, Schema, Stream } from 'effect'
 import { Agent } from '../src/Agent.ts'
 import { Config } from '../src/Config.ts'
@@ -12,9 +12,13 @@ export const configLayer = (cacheRoot = '/cache') => Config.layerTest({ cacheRoo
 
 export type AgentCall = { prompt: string; cwd: string; related?: ReadonlyArray<string>; resume?: string; log: { kind: string; number: number } }
 
-/** An Agent whose structured runs answer with `reply()` and whose streaming runs emit `Hi` then Done. */
-export const fakeAgent = (reply: (call: AgentCall) => Effect.Effect<unknown, any> = () => Effect.succeed({ decisions: [], skim: [], claims: [] } satisfies AgentSort)) => {
+/** An Agent whose structured runs answer with `reply()`, streaming runs emit `Hi` then Done, and ticket runs answer with `ticket()` (default: no ticket account). */
+export const fakeAgent = (
+  reply: (call: AgentCall) => Effect.Effect<unknown, any> = () => Effect.succeed({ decisions: [], skim: [], claims: [] } satisfies AgentSort),
+  ticket: (prompt: string) => Effect.Effect<string, AgentError> = () => Effect.fail(new AgentError({ message: 'No AI account is set to read tickets' })),
+) => {
   const calls: AgentCall[] = []
+  const ticketPrompts: string[] = []
   const layer = Layer.succeed(
     Agent,
     Agent.of({
@@ -31,10 +35,11 @@ export const fakeAgent = (reply: (call: AgentCall) => Effect.Effect<unknown, any
           calls.push(o)
           return Stream.make({ _tag: 'Text' as const, delta: 'Hi' }, { _tag: 'Done' as const, sessionId: 'sess-1' })
         }),
+      ticket: (o) => Effect.suspend(() => (ticketPrompts.push(o.prompt), ticket(o.prompt))),
       status: Effect.succeed([]),
     }),
   )
-  return { calls, layer }
+  return { calls, ticketPrompts, layer }
 }
 
 export const overviewReply: StackOverview = { summary: 's', tables: [], modules: [], endpoints: [], sharedLayers: [] }
@@ -79,6 +84,7 @@ export const fakeGitHub = (overrides: Partial<GitHubClient> = {}) =>
           listThreads: () => Effect.succeed([]),
           viewer: () => Effect.succeed('me'),
           fileAt: () => Effect.undefined,
+          getIssue: () => Effect.succeed(null),
           description: () => Effect.succeed(''),
           submitReview: () => Effect.die('unused'),
           ...overrides,

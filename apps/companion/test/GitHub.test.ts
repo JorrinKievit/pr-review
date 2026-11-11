@@ -35,6 +35,18 @@ describe('GitHub', () => {
       })
     }))
 
+  it.effect('getIssue reads an issue; a pull request or a missing issue is null', () =>
+    Effect.gen(function* () {
+      const gh = yield* makeClient(
+        fakeOctokit((r) =>
+          r.url.endsWith('/issues/1') ? { status: 200, body: { title: 'Bug', body: null } } : r.url.endsWith('/issues/2') ? { status: 200, body: { title: 'PR', body: '', pull_request: {} } } : { status: 404, body: { message: 'Not Found' } },
+        ).octokit,
+      )
+      assert.deepStrictEqual(yield* gh.getIssue('o', 'r', 1), { title: 'Bug', body: '' })
+      assert.isNull(yield* gh.getIssue('o', 'r', 2))
+      assert.isNull(yield* gh.getIssue('o', 'r', 3))
+    }))
+
   it.effect('getPr is cached for 30 seconds', () =>
     Effect.gen(function* () {
       const { reqs, octokit } = fakeOctokit(() => ({ status: 200, body: prJson }))

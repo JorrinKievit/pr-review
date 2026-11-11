@@ -6,6 +6,7 @@ import { homedir } from 'node:os'
 import { Readable, Writable } from 'node:stream'
 import { safeGhCommand, safeGitCommand } from './gitOnly.ts'
 import { loginPath } from './shellPath.ts'
+import { ticketPermission } from './permissions.ts'
 import { describeTool } from './steps.ts'
 
 export type AcpUpdate = { readonly _tag: 'Text'; readonly delta: string } | { readonly _tag: 'Step'; readonly step: string }
@@ -20,7 +21,10 @@ export interface AcpSession {
 export type Launch = (account: AgentAccount, cwd: string) => Effect.Effect<{ target: acp.Stream | acp.AgentApp; output: () => string }, AgentError, Scope.Scope>
 
 // Claude Code's own settings could allow tools past the gate; its ACP adapter takes SDK options here.
-const claudeOptions = { claudeCode: { options: { settingSources: [], disallowedTools: ['Edit', 'Write', 'NotebookEdit', 'WebFetch', 'WebSearch', 'Task'] } } }
+const disallowedTools = ['Edit', 'Write', 'NotebookEdit', 'WebFetch', 'WebSearch', 'Task']
+const claudeOptions = { claudeCode: { options: { settingSources: [], disallowedTools } } }
+// The ticket session loads the user's own config so their tracker MCP servers are there; it never sees PR code.
+const ticketOptions = { claudeCode: { options: { settingSources: ['user'], disallowedTools } } }
 const READ_ONLY_MODES = [/read.?only/i, /^ask$/i, /^plan$/i, /^default$/i, /manual/i]
 
 const agentError = (e: unknown, output = '') =>
@@ -55,7 +59,7 @@ export const spawnAgent: Launch = (account, cwd) =>
     return { target, output: () => output }
   })
 
-export class Acp extends Context.Service<Acp, { open(account: AgentAccount, cwd: string, resume?: string, o?: { related?: ReadonlyArray<string> }): Effect.Effect<AcpSession, AgentError, Scope.Scope> }>()(
+export class Acp extends Context.Service<Acp, { open(account: AgentAccount, cwd: string, resume?: string, o?: { related?: ReadonlyArray<string>; tickets?: boolean }): Effect.Effect<AcpSession, AgentError, Scope.Scope> }>()(
   'pr-review/Acp',
 ) {
   static readonly layerWith = (launch: Launch) =>
@@ -74,7 +78,9 @@ export class Acp extends Context.Service<Acp, { open(account: AgentAccount, cwd:
               .onNotification(acp.methods.client.session.update, (ctx) => void Queue.offerUnsafe(updates, ctx.params))
               .onRequest(acp.methods.client.session.requestPermission, (ctx) => {
                 const raw = ctx.params.toolCall.rawInput as { command?: unknown } | undefined
-                const allowed = ctx.params.toolCall.kind === 'execute' && typeof raw?.command === 'string' && (safeGitCommand(raw.command) || safeGhCommand(raw.command, o?.related ?? []))
+                const allowed = o?.tickets
+                  ? ticketPermission(ctx.params.toolCall)
+                  : ctx.params.toolCall.kind === 'execute' && typeof raw?.command === 'string' && (safeGitCommand(raw.command) || safeGhCommand(raw.command, o?.related ?? []))
                 const option = ctx.params.options.find((o) => o.kind === (allowed ? 'allow_once' : 'reject_once')) ?? ctx.params.options.find((o) => o.kind.startsWith(allowed ? 'allow' : 'reject'))
                 return option ? { outcome: { outcome: 'selected', optionId: option.optionId } } : { outcome: { outcome: 'cancelled' } }
               })
@@ -86,12 +92,13 @@ export class Acp extends Context.Service<Acp, { open(account: AgentAccount, cwd:
 
             const init = yield* call(() => agent.request(acp.methods.agent.initialize, { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} }))
             const caps = init.agentCapabilities
+            const _meta = o?.tickets ? ticketOptions : claudeOptions
             const start = () =>
               resume
                 ? caps?.sessionCapabilities?.resume
-                  ? agent.request(acp.methods.agent.session.resume, { sessionId: resume, cwd, mcpServers: [], _meta: claudeOptions })
-                  : agent.request(acp.methods.agent.session.load, { sessionId: resume, cwd, mcpServers: [], _meta: claudeOptions })
-                : agent.request(acp.methods.agent.session.new, { cwd, mcpServers: [], _meta: claudeOptions })
+                  ? agent.request(acp.methods.agent.session.resume, { sessionId: resume, cwd, mcpServers: [], _meta })
+                  : agent.request(acp.methods.agent.session.load, { sessionId: resume, cwd, mcpServers: [], _meta })
+                : agent.request(acp.methods.agent.session.new, { cwd, mcpServers: [], _meta })
             // Agents that keep their own login (Cursor, Gemini) want it named first; an API key is never offered.
             const login = init.authMethods?.find((m) => m.id !== 'api-key' && !('type' in m && m.type === 'terminal'))
             const session = yield* call(start).pipe(

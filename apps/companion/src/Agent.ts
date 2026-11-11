@@ -32,6 +32,8 @@ export class Agent extends Context.Service<
     structured<S extends Schema.Top & { readonly DecodingServices: never }>(o: Run & { schema: S }): Effect.Effect<S['Type'], AgentError>
     /** `resume` is a Done event's sessionId; it names the account the conversation ran on. */
     streaming(o: Run & { resume?: string }): Stream.Stream<AskEvent, AgentError>
+    /** One read-only turn on an account set to read tickets, in an empty temp dir; the answer text. */
+    ticket(o: { prompt: string; log: RunLog }): Effect.Effect<string, AgentError>
     readonly status: Effect.Effect<ReadonlyArray<AccountStatus>>
   }
 >()('pr-review/Agent') {
@@ -46,16 +48,22 @@ export class Agent extends Context.Service<
       const stateOf = (id: string) => states.get(id) ?? states.set(id, { busy: 0, until: 0, error: null }).get(id)!
       const step = (o: Run, s: string) => (o.onStep ?? (() => Effect.void))(s)
 
+      const eligible = (a: AgentAccount, tickets: boolean) => a.enabled && (!tickets || a.tickets === true)
+
       /** The least busy account with room, held until the scope closes. Waits while all are busy. */
-      const acquire = (o: Run, avoid: ReadonlySet<string>, only?: string) =>
+      const acquire = (o: Run, avoid: ReadonlySet<string>, only?: string, tickets = false) =>
         Effect.acquireRelease(
           Effect.gen(function* () {
             let waiting = false
             for (;;) {
-              const pool = (yield* config.settings).accounts.filter((a) => a.enabled && !avoid.has(a.id) && (only === undefined || a.id === only))
+              const pool = (yield* config.settings).accounts.filter((a) => eligible(a, tickets) && !avoid.has(a.id) && (only === undefined || a.id === only))
               if (pool.length === 0)
                 return yield* new AgentError({
-                  message: only ? 'The AI account this conversation ran on is not in the pool anymore. Ask a new question.' : 'No AI account can take this. Add or enable one in the settings.',
+                  message: only
+                    ? 'The AI account this conversation ran on is not in the pool anymore. Ask a new question.'
+                    : tickets
+                      ? 'No AI account is set to read tickets'
+                      : 'No AI account can take this. Add or enable one in the settings.',
                 })
               const now = yield* Clock.currentTimeMillis
               const ready = pool.filter((a) => stateOf(a.id).until <= now)
@@ -108,13 +116,13 @@ export class Agent extends Context.Service<
         }).pipe(Effect.ignore)
 
       /** Runs on one account after another until one answers or none is left; an account that hits its limit sits out. */
-      const withAccount = <A>(o: Run, use: (a: AgentAccount) => Effect.Effect<A, AgentError, Scope.Scope>) => {
+      const withAccount = <A>(o: Run, use: (a: AgentAccount) => Effect.Effect<A, AgentError, Scope.Scope>, tickets = false) => {
         const attempt = (avoid: ReadonlySet<string>): Effect.Effect<A, AgentError> =>
           Effect.gen(function* () {
             let account: AgentAccount | undefined
             const result = yield* Effect.scoped(
               Effect.gen(function* () {
-                const a = yield* acquire(o, avoid)
+                const a = yield* acquire(o, avoid, undefined, tickets)
                 account = a
                 const startedAt = yield* Clock.currentTimeMillis
                 return yield* timeLimit(a, use(a)).pipe(Effect.ensuring(logUsage(o, a, startedAt)))
@@ -124,7 +132,7 @@ export class Agent extends Context.Service<
             if (account && (yield* bench(account, result.failure))) {
               const tried = new Set([...avoid, account.id])
               const now = yield* Clock.currentTimeMillis
-              const other = (yield* config.settings).accounts.some((a) => a.enabled && !tried.has(a.id) && stateOf(a.id).until <= now)
+              const other = (yield* config.settings).accounts.some((a) => eligible(a, tickets) && !tried.has(a.id) && stateOf(a.id).until <= now)
               if (other) {
                 yield* step(o, `${account.name} is at its limit; trying another account`)
                 return yield* attempt(tried)
@@ -175,6 +183,21 @@ export class Agent extends Context.Service<
             }),
           ).pipe(Stream.scoped)
         },
+
+        ticket: (o) =>
+          Effect.scoped(
+            Effect.gen(function* () {
+              const cwd = yield* fs.makeTempDirectoryScoped({ prefix: 'pr-review-ticket-' }).pipe(Effect.mapError((e) => new AgentError({ message: e.message })))
+              return yield* withAccount(
+                { ...o, cwd },
+                (a) =>
+                  Effect.flatMap(acp.open(a, cwd, undefined, { tickets: true }), (session) =>
+                    session.prompt(o.prompt).pipe(Stream.runFold(() => '', (acc, u) => (u._tag === 'Text' ? acc + u.delta : acc))),
+                  ),
+                true,
+              )
+            }),
+          ),
 
         status: Effect.map(config.settings, (s) => s.accounts.map((a) => ({ id: a.id, ...stateOf(a.id) }))),
       })

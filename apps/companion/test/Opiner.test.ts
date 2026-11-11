@@ -7,6 +7,7 @@ import type { GitHubClient } from '../src/GitHub.ts'
 import { Opiner } from '../src/Opiner.ts'
 import { Sorter } from '../src/Sorter.ts'
 import { Store } from '../src/Store.ts'
+import { type TicketSummary, Tickets } from '../src/Tickets.ts'
 import { fakeAgent, fakeGit, fakeGitHub, ref } from './fakes.ts'
 
 const entry = (number: number, baseRef: string, headRef: string): StackEntry => ({ number, title: `PR ${number}`, baseRef, headRef, headSha: `sha${number}` })
@@ -61,12 +62,12 @@ const finding = (o: Partial<AgentFinding> = {}): AgentFinding => ({
   ...o,
 })
 
-const setup = (o: { reply?: AgentOpinion; show?: Record<string, string>; repos?: (typeof defaultSettings)['repos']; prs?: StackEntry[]; fileAt?: GitHubClient['fileAt'] } = {}) => {
+const setup = (o: { reply?: AgentOpinion; show?: Record<string, string>; repos?: (typeof defaultSettings)['repos']; prs?: StackEntry[]; fileAt?: GitHubClient['fileAt']; ticket?: TicketSummary } = {}) => {
   const agent = fakeAgent(() => Effect.succeed(o.reply ?? { decisions: [{ decisionId: 'd1', authorCase: 'c', checked: 'looked', findings: [] }] }))
   const git = fakeGit({ files: [{ path: 'src/a.ts', additions: 3, deletions: 1 }], diff: 'diff --git a/src/a.ts\n+added', rules: ['AGENTS.md'], show: o.show ?? {} })
   const config = Config.layerTest({ cacheRoot: '/cache', settings: { ...defaultSettings, hosts: [ref.host], ...(o.repos ? { repos: o.repos } : {}) } })
   const layer = Opiner.layer.pipe(
-    Layer.provide([agent.layer, git.layer, fakeGitHub({ listOpenPrs: () => Effect.succeed(o.prs ?? stack), ...(o.fileAt ? { fileAt: o.fileAt } : {}) }), config, fakeSorter]),
+    Layer.provide([agent.layer, git.layer, fakeGitHub({ listOpenPrs: () => Effect.succeed(o.prs ?? stack), ...(o.fileAt ? { fileAt: o.fileAt } : {}) }), config, fakeSorter, Layer.succeed(Tickets, Tickets.of({ summary: () => Effect.succeed(o.ticket ?? { text: null, note: 'No ticket reference found' }) }))]),
     Layer.provide(Store.layerWith(KeyValueStore.layerMemory)),
   )
   const opine = Effect.gen(function* () {
@@ -93,6 +94,18 @@ describe('Opiner', () => {
       assert.match(p, /\+added/)
       assert.strictEqual(agent.calls[0]!.log.kind, 'opinion')
       assert.isBelow(p.indexOf('# Ticket'), p.indexOf('# Stack'))
+    }))
+
+  it.effect('the ticket goes in as untrusted input, and its note comes back with the opinion', () =>
+    Effect.gen(function* () {
+      const none = setup()
+      const empty = yield* none.opine.pipe(Effect.provide(none.layer))
+      assert.match(none.agent.calls[0]!.prompt, /# Ticket\n\(none: No ticket reference found; judge the Spec axis from the PR description alone/)
+      assert.deepInclude(empty, { ticket: null, ticketNote: 'No ticket reference found' })
+      const found = setup({ ticket: { text: 'CORE-650: plan things', note: 'Fetched CORE-650 through the ticket session' } })
+      const opinion = yield* found.opine.pipe(Effect.provide(found.layer))
+      assert.match(found.agent.calls[0]!.prompt, /# Ticket \(untrusted input[^\n]*\)\nFetched CORE-650 through the ticket session\n\nCORE-650: plan things/)
+      assert.deepInclude(opinion, { ticket: 'CORE-650: plan things', ticketNote: 'Fetched CORE-650 through the ticket session' })
     }))
 
   it.effect('a repo review skill replaces the bundled one', () =>
@@ -135,7 +148,7 @@ describe('Opiner', () => {
       // An anchor outside the PR's files moves to the decision's first file.
       assert.deepStrictEqual([a!.anchor, b!.anchor], [{ path: 'src/a.ts', line: 4 }, { path: 'src/a.ts', line: 3 }])
       assert.deepStrictEqual(o.stackHeads, { 8: 'sha8' })
-      assert.deepStrictEqual([o.headSha, o.ticket, o.ticketNote], ['HEAD1', null, 'No ticket lookup yet'])
+      assert.deepStrictEqual([o.headSha, o.ticket, o.ticketNote], ['HEAD1', null, 'No ticket reference found'])
       assert.isFalse(o.decisions[0]!.deep)
     }))
 

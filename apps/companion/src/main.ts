@@ -18,9 +18,10 @@ import { Overview } from './Overview.ts'
 import { loginPath } from './shellPath.ts'
 import { Sorter } from './Sorter.ts'
 import { Store } from './Store.ts'
+import { Tickets } from './Tickets.ts'
 
 const services = Layer.mergeAll(Opiner.layer, Asker.layer, Overview.layer).pipe(
-  Layer.provideMerge(Sorter.layer),
+  Layer.provideMerge(Layer.mergeAll(Sorter.layer, Tickets.layer)),
   Layer.provideMerge(Layer.mergeAll(Git.layer, GitHub.layer, Store.layer)),
   Layer.provideMerge(Agent.layer.pipe(Layer.provide(Acp.layer))),
   Layer.provideMerge(Git.layer),

@@ -3,7 +3,7 @@ import { assert, describe, it } from '@effect/vitest'
 import { type AgentAccount, AgentError, defaultSettings } from '@pr-review/domain'
 import { Deferred, Effect, Fiber, Layer, Schema, Stream } from 'effect'
 import { TestClock } from 'effect/testing'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { Acp } from '../src/Acp.ts'
 import { Agent } from '../src/Agent.ts'
@@ -17,14 +17,14 @@ type Answer = (a: AgentAccount, prompt: string) => Effect.Effect<string, AgentEr
 
 /** An Acp whose sessions answer each prompt with `answer`, after one step. */
 const setup = (answer: Answer, accounts = [account('a'), account('b')]) => {
-  const opened: Array<{ account: string; resume: string | undefined }> = []
+  const opened: Array<{ account: string; resume: string | undefined; cwd: string; tickets?: boolean }> = []
   const prompts: string[] = []
   const acp = Layer.succeed(
     Acp,
     Acp.of({
-      open: (a, _cwd, resume) =>
+      open: (a, cwd, resume, o) =>
         Effect.sync(() => {
-          opened.push({ account: a.id, resume })
+          opened.push({ account: a.id, resume, cwd, ...(o?.tickets ? { tickets: true } : {}) })
           return {
             sessionId: resume ?? `S-${a.id}`,
             prompt: (text) =>
@@ -139,6 +139,28 @@ describe('Agent.structured', () => {
     }))
 })
 
+describe('Agent.ticket', () => {
+  const ticket = Effect.gen(function* () {
+    return yield* (yield* Agent).ticket({ prompt: 'Fetch ABC-1', log: { ...log, kind: 'ticket' } })
+  })
+
+  it.live('runs on an account set to read tickets, in an empty temp dir removed after', () =>
+    Effect.gen(function* () {
+      const { layer, opened } = setup((_a, p) => Effect.succeed(`summary of ${p}`), [account('a'), { ...account('b'), tickets: true }])
+      assert.strictEqual(yield* ticket.pipe(Effect.provide(layer)), 'summary of Fetch ABC-1')
+      assert.deepInclude(opened[0], { account: 'b', tickets: true })
+      assert.notStrictEqual(opened[0]!.cwd, '/repo')
+      assert.isFalse(existsSync(opened[0]!.cwd))
+    }))
+
+  it.live('without such an account it says so', () =>
+    Effect.gen(function* () {
+      const { layer } = setup(() => Effect.succeed('x'), [account('a'), { ...account('b'), tickets: true, enabled: false }])
+      const e = yield* Effect.flip(ticket.pipe(Effect.provide(layer)))
+      assert.strictEqual(e.message, 'No AI account is set to read tickets')
+    }))
+})
+
 describe('Agent.streaming', () => {
   const ask = (resume?: string) =>
     Effect.gen(function* () {
@@ -158,7 +180,7 @@ describe('Agent.streaming', () => {
     Effect.gen(function* () {
       const { layer, opened } = setup(() => Effect.succeed('More.'))
       const events = yield* ask('b:S-old').pipe(Effect.provide(layer))
-      assert.deepStrictEqual(opened, [{ account: 'b', resume: 'S-old' }])
+      assert.deepStrictEqual(opened, [{ account: 'b', resume: 'S-old', cwd: '/repo' }])
       assert.deepStrictEqual(events.at(-1), { _tag: 'Done', sessionId: 'b:S-old' })
     }))
 })

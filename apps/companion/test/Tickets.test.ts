@@ -29,6 +29,18 @@ describe('Tickets', () => {
       assert.match(s.note, /#45/)
     }))
 
+  it.effect('sibling PRs listed first do not use up the issue lookups', () =>
+    Effect.gen(function* () {
+      const asked: number[] = []
+      const { summary } = setup({
+        body: 'Part of a series: #2927 #2928 #2929 #2930. Closes #45',
+        getIssue: (_o, _r, n) => Effect.sync(() => (asked.push(n), n === 45 ? { title: 'The ask', body: 'b' } : null)),
+      })
+      const s = yield* summary
+      assert.match(s.text!, /#45: The ask/)
+      assert.deepStrictEqual(asked, [2927, 2928, 2929, 2930, 45])
+    }))
+
   it.effect('other refs go to the ticket session with only the refs', () =>
     Effect.gen(function* () {
       const { agent, summary } = setup({ body: 'SECRET BODY\n```diff\n+code\n```', headRef: 'feat/CORE-650-planning', ticket: () => Effect.succeed('CORE-650: plan things') })

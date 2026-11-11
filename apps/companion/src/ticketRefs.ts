@@ -1,6 +1,8 @@
 export type TicketRef = { kind: 'github'; owner?: string; repo?: string; number: number } | { kind: 'other'; ref: string }
 
-const MAX = 3
+export const MAX = 3
+// GitHub refs are often sibling PRs, which only the API can tell apart; the caller keeps the first MAX real issues.
+const MAX_GITHUB = 10
 const TOKENS = /(https?:\/\/[^\s<>()[\]]+)|(?<![\w/&])#(\d+)\b|\b([A-Z][A-Z0-9]+-\d+)\b/g
 const TICKET_PATH = /\/(browse|issues?)\//
 const NOT_TICKETS = new Set(['UTF', 'SHA', 'ISO', 'RFC', 'HTTP', 'TLS', 'AES', 'MD', 'X'])
@@ -30,5 +32,5 @@ export const ticketRefs = (text: string, host: string): TicketRef[] => {
   // A key that is also part of a ticket URL is that ticket.
   const segments = new Set(other.filter((r) => r.includes('://')).flatMap((r) => r.split(/[^A-Za-z0-9-]/)))
   const others = other.filter((r) => r.includes('://') || !segments.has(r))
-  return [...github.slice(0, MAX), ...others.slice(0, MAX).map((ref): TicketRef => ({ kind: 'other', ref }))]
+  return [...github.slice(0, MAX_GITHUB), ...others.slice(0, MAX).map((ref): TicketRef => ({ kind: 'other', ref }))]
 }

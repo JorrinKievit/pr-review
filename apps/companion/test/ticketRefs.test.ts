@@ -28,11 +28,9 @@ describe('ticketRefs', () => {
   })
 
   it('deduplicates and caps', () => {
-    const refs = ticketRefs('#1 #1 #2 #3 #4 AB-1 AB-1 BC-2 CD-3 DE-4', 'github.com')
+    const refs = ticketRefs('#1 #1 #2 #3 #4 #5 #6 #7 #8 #9 #10 #11 AB-1 AB-1 BC-2 CD-3 DE-4', 'github.com')
     assert.deepStrictEqual(refs, [
-      { kind: 'github', number: 1 },
-      { kind: 'github', number: 2 },
-      { kind: 'github', number: 3 },
+      ...[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((number) => ({ kind: 'github', number })),
       { kind: 'other', ref: 'AB-1' },
       { kind: 'other', ref: 'BC-2' },
       { kind: 'other', ref: 'CD-3' },

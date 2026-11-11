@@ -3,7 +3,7 @@ import { Cache, Context, Effect, Exit, Layer } from 'effect'
 import { readFileSync } from 'node:fs'
 import { Agent } from './Agent.ts'
 import { GitHub } from './GitHub.ts'
-import { ticketRefs } from './ticketRefs.ts'
+import { MAX, ticketRefs } from './ticketRefs.ts'
 
 const ticketPrompt = readFileSync(new URL('../prompts/ticket.md', import.meta.url), 'utf8')
 
@@ -28,11 +28,13 @@ export class Tickets extends Context.Service<
           const texts: string[] = []
           const notes: string[] = []
           const gh = yield* github.forHost(ref.host).pipe(Effect.option)
+          let issues = 0
           for (const r of refs) {
-            if (r.kind !== 'github') continue
+            if (r.kind !== 'github' || issues === MAX) continue
             const name = r.owner ? `${r.owner}/${r.repo}#${r.number}` : `#${r.number}`
             const issue = gh._tag === 'Some' ? yield* gh.value.getIssue(r.owner ?? ref.owner, r.repo ?? ref.repo, r.number).pipe(Effect.option) : undefined
             if (issue?._tag === 'Some' && issue.value) {
+              issues++
               texts.push(`## GitHub issue ${name}: ${issue.value.title}\n\n${issue.value.body || '(no description)'}`)
               notes.push(`Read ${name} from GitHub`)
             } else if (issue?._tag !== 'Some') notes.push(`Could not fetch ${name}`)

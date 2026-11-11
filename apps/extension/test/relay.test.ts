@@ -126,6 +126,24 @@ describe('relay', () => {
       assert.strictEqual(native.opened, 2)
     }).pipe(Effect.scoped))
 
+  it.effect('a prepare with no page closes the connection after 10 minutes, not before', () =>
+    Effect.gen(function* () {
+      const companion = fakeCompanion({ handlers: { Prepare: () => Effect.void } })
+      yield* Layer.build(companion.server)
+      let closed = 0
+      companion.hub.onConnect.addListener((port) => port.onDisconnect.addListener(() => closed++))
+      let fire: (r: typeof ref) => void = () => {}
+      yield* Layer.build(relay(() => ({ port: companion.hub.connect(), lastError: () => undefined }), memoryHub().onConnect, Effect.succeed(undefined), undefined, { addListener: (f) => (fire = f) }))
+      fire(ref)
+      yield* flush
+      yield* TestClock.adjust('9 minutes')
+      yield* flush
+      assert.strictEqual(closed, 0)
+      yield* TestClock.adjust('1 minute')
+      yield* flush
+      assert.strictEqual(closed, 1)
+    }).pipe(Effect.scoped))
+
   it.effect('native disconnect surfaces CompanionUnavailable', () =>
     Effect.gen(function* () {
       const { companion, page } = yield* setup()

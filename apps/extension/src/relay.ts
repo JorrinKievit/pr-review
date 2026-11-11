@@ -1,12 +1,14 @@
 import { CompanionUnavailable, type PrRef, ReviewRpcs, type Settings } from '@pr-review/domain'
 import { makePortClient, type OnConnectLike, type PortLike, portServer } from '@pr-review/native-messaging'
-import { Deferred, Effect, Exit, Fiber, Layer, Option, Scope, Semaphore, Stream } from 'effect'
+import { Clock, Deferred, Duration, Effect, Exit, Fiber, Layer, Option, Scope, Semaphore, Stream } from 'effect'
 import type { RpcClient, RpcClientError, RpcGroup } from 'effect/rpc'
 
 /** A native port plus what Chrome said when it failed (`chrome.runtime.lastError`). */
 export type NativeConnect = () => { port: PortLike; lastError: () => string | undefined }
 
 export const IDLE = '5 minutes'
+/** How long an early start keeps the host open, so the companion can finish its run. */
+export const PREPARE_HOLD = '10 minutes'
 
 const deadPort = (): PortLike => ({
   postMessage: () => {},
@@ -32,6 +34,19 @@ export const relay = (native: NativeConnect, pages: OnConnectLike, settings: Eff
       let current: Connection | undefined
       let pageCount = 0
       let idle: Fiber.Fiber<void> | undefined
+      let holdUntil = 0
+      /** Closes the host when `holdUntil` passes, unless a page came back; each call replaces the pending timer. */
+      const armIdle = (ms: number) =>
+        Effect.gen(function* () {
+          holdUntil = Math.max(holdUntil, (yield* Clock.currentTimeMillis) + ms)
+          if (idle) yield* Fiber.interrupt(idle)
+          idle = run(
+            Effect.suspend(() => Clock.currentTimeMillis).pipe(
+              Effect.flatMap((now) => Effect.sleep(Math.max(0, holdUntil - now))),
+              Effect.andThen(Effect.suspend(() => (current ? close(current) : Effect.void))),
+            ),
+          )
+        })
 
       let dead: Connection[] = []
       const close = (c: Connection) =>
@@ -122,7 +137,13 @@ export const relay = (native: NativeConnect, pages: OnConnectLike, settings: Eff
       })
 
       // Early start from a PR page: best effort, no companion means nothing happens.
-      prepares?.addListener((ref) => run(Effect.ignore(call((c) => c.Prepare({ ref })))))
+      prepares?.addListener((ref) =>
+        run(
+          Effect.ignore(call((c) => c.Prepare({ ref }))).pipe(
+            Effect.andThen(Effect.suspend(() => (pageCount === 0 ? armIdle(Duration.toMillis(Duration.fromInputUnsafe(PREPARE_HOLD))) : Effect.void))),
+          ),
+        ),
+      )
 
       const counted: OnConnectLike = {
         addListener: (f) =>
@@ -131,7 +152,7 @@ export const relay = (native: NativeConnect, pages: OnConnectLike, settings: Eff
             if (idle) run(Fiber.interrupt(idle))
             port.onDisconnect.addListener(() => {
               if (--pageCount > 0) return
-              idle = run(Effect.sleep(IDLE).pipe(Effect.andThen(Effect.suspend(() => (current ? close(current) : Effect.void)))))
+              run(armIdle(Duration.toMillis(Duration.fromInputUnsafe(IDLE))))
             })
             f(port)
           }),

@@ -4,7 +4,7 @@ import { Context, Effect, Fiber, Layer, Queue, type Scope, Stream } from 'effect
 import { spawn } from 'node:child_process'
 import { homedir } from 'node:os'
 import { Readable, Writable } from 'node:stream'
-import { safeGitCommand } from './gitOnly.ts'
+import { safeGhCommand, safeGitCommand } from './gitOnly.ts'
 import { loginPath } from './shellPath.ts'
 import { describeTool } from './steps.ts'
 
@@ -55,14 +55,14 @@ export const spawnAgent: Launch = (account, cwd) =>
     return { target, output: () => output }
   })
 
-export class Acp extends Context.Service<Acp, { open(account: AgentAccount, cwd: string, resume?: string): Effect.Effect<AcpSession, AgentError, Scope.Scope> }>()(
+export class Acp extends Context.Service<Acp, { open(account: AgentAccount, cwd: string, resume?: string, o?: { related?: ReadonlyArray<string> }): Effect.Effect<AcpSession, AgentError, Scope.Scope> }>()(
   'pr-review/Acp',
 ) {
   static readonly layerWith = (launch: Launch) =>
     Layer.succeed(
       Acp,
       Acp.of({
-        open: (account, cwd, resume) =>
+        open: (account, cwd, resume, o) =>
           Effect.gen(function* () {
             const { target, output } = yield* launch(account, cwd)
             const updates = yield* Queue.unbounded<acp.SessionNotification | 'stop'>()
@@ -74,7 +74,7 @@ export class Acp extends Context.Service<Acp, { open(account: AgentAccount, cwd:
               .onNotification(acp.methods.client.session.update, (ctx) => void Queue.offerUnsafe(updates, ctx.params))
               .onRequest(acp.methods.client.session.requestPermission, (ctx) => {
                 const raw = ctx.params.toolCall.rawInput as { command?: unknown } | undefined
-                const allowed = ctx.params.toolCall.kind === 'execute' && typeof raw?.command === 'string' && safeGitCommand(raw.command)
+                const allowed = ctx.params.toolCall.kind === 'execute' && typeof raw?.command === 'string' && (safeGitCommand(raw.command) || safeGhCommand(raw.command, o?.related ?? []))
                 const option = ctx.params.options.find((o) => o.kind === (allowed ? 'allow_once' : 'reject_once')) ?? ctx.params.options.find((o) => o.kind.startsWith(allowed ? 'allow' : 'reject'))
                 return option ? { outcome: { outcome: 'selected', optionId: option.optionId } } : { outcome: { outcome: 'cancelled' } }
               })

@@ -94,7 +94,7 @@ export class Opiner extends Context.Service<
           { concurrency: 4 },
         )
         const master = `origin/${defaultBranch}`
-        const skillPath = repoSettings(settings, repoKey).reviewSkill
+        const { related, reviewSkill: skillPath } = repoSettings(settings, repoKey)
         const skill = skillPath
           ? yield* git.show(repoKey, master, skillPath).pipe(
               Effect.catchTag('GitError', (e) => Effect.as(Effect.logWarning(`Review skill ${skillPath} not readable at ${master}, using the bundled one: ${e.message}`), bundledSkill)),
@@ -130,7 +130,9 @@ export class Opiner extends Context.Service<
           skill,
           `# Refs\nPR head: ${head}\nMerge base: ${mergeBase}\nDefault branch: ${master}`,
           `# Review guidance (the repo's own rules; read the ones that apply with git show ${master}:<path>)\n${guidance.join('\n') || '(none)'}`,
-          '# Related repos\n(none)',
+          related.length
+            ? `# Related repos (services this team owns; read-only through gh api, default branch only, never clone)\n${related.map((r) => `${r.repo}: ${r.note}`).join('\n')}\nRead with: gh api --hostname <host> -H 'Accept: application/vnd.github.raw' repos/<owner>/<repo>/contents/<file>\nList with: gh api --hostname <host> repos/<owner>/<repo>/git/trees/<branch>?recursive=1\nSearch with: gh api --hostname <host> 'search/code?q=<terms>+repo:<owner>/<repo>'\nOmit --hostname for github.com. Cite what you read as ref "related" with the repo set.`
+            : '# Related repos\n(none)',
           '# Ticket\n(none)',
           `# Stack (bottom first; compare a PR with the one below it using git diff <head below> <its head>)\n${stackText.join('\n\n') || '(not stacked)'}`,
           `# PR #${number}: ${pr.title} (by ${pr.author})\n\n${pr.body || '(no description)'}`,
@@ -144,12 +146,20 @@ export class Opiner extends Context.Service<
           prompt,
           schema: AgentOpinion,
           cwd: git.dir(repoKey),
+          related: related.map((r) => r.repo),
           log: { kind: 'opinion', owner, repo, number, headSha: head },
           onStep: report,
         })
         yield* report('Checking the citations')
-        const read = (e: Evidence) =>
-          e.ref === 'base' || e.ref === 'head' ? git.show(repoKey, e.ref === 'base' ? mergeBase : head, e.path).pipe(Effect.orElseSucceed(() => undefined)) : Effect.undefined
+        const read = (e: Evidence): Effect.Effect<string | undefined> => {
+          if (e.ref === 'base' || e.ref === 'head') return git.show(repoKey, e.ref === 'base' ? mergeBase : head, e.path).pipe(Effect.orElseSucceed(() => undefined))
+          if (e.ref !== 'related' || !e.repo || !related.some((r) => r.repo === e.repo)) return Effect.undefined
+          const [relHost, relOwner, ...rest] = e.repo.split('/')
+          return github.forHost(relHost!).pipe(
+            Effect.flatMap((c) => c.fileAt(relOwner!, rest.join('/'), e.path)),
+            Effect.orElseSucceed(() => undefined),
+          )
+        }
         const decisions = yield* normalize(answer, { number, sort, files, above: above.map((e) => e.number), read })
         return { headSha: head, ticket: null, ticketNote: 'No ticket lookup yet', decisions, stackHeads: headsOf(above) } satisfies PrOpinion
       })

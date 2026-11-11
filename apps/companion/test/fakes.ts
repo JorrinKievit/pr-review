@@ -10,7 +10,7 @@ export const repoKey = 'h/o/r'
 
 export const configLayer = (cacheRoot = '/cache') => Config.layerTest({ cacheRoot, settings: { ...defaultSettings, hosts: [ref.host] } })
 
-export type AgentCall = { prompt: string; cwd: string; resume?: string; log: { kind: string; number: number } }
+export type AgentCall = { prompt: string; cwd: string; related?: ReadonlyArray<string>; resume?: string; log: { kind: string; number: number } }
 
 /** An Agent whose structured runs answer with `reply()` and whose streaming runs emit `Hi` then Done. */
 export const fakeAgent = (reply: (call: AgentCall) => Effect.Effect<unknown, any> = () => Effect.succeed({ decisions: [], skim: [], claims: [] } satisfies AgentSort)) => {
@@ -78,6 +78,7 @@ export const fakeGitHub = (overrides: Partial<GitHubClient> = {}) =>
           listOpenPrs: () => Effect.succeed([]),
           listThreads: () => Effect.succeed([]),
           viewer: () => Effect.succeed('me'),
+          fileAt: () => Effect.undefined,
           description: () => Effect.succeed(''),
           submitReview: () => Effect.die('unused'),
           ...overrides,

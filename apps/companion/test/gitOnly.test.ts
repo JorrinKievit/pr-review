@@ -1,5 +1,5 @@
 import { assert, describe, it } from '@effect/vitest'
-import { safeGitCommand } from '../src/gitOnly.ts'
+import { safeGhCommand, safeGitCommand } from '../src/gitOnly.ts'
 
 describe('gitOnly', () => {
   const allowed = async (_tool: string, input: Record<string, unknown>) => typeof input.command === 'string' && safeGitCommand(input.command)
@@ -44,5 +44,43 @@ describe('gitOnly', () => {
       assert.isFalse(await allowed('Bash', { command }), command)
     }
     assert.isFalse(await allowed('Write', { file_path: 'x' }))
+  })
+
+  describe('gh', () => {
+    const related = ['h/o/svc']
+    const gh = (c: string) => safeGhCommand(c, related)
+
+    it('allows reads of related repos', () => {
+      assert.isTrue(gh("gh api --hostname h repos/o/svc/contents/app/Enums/X.php -H 'Accept: application/vnd.github.raw'"))
+      assert.isTrue(gh("gh api --hostname h 'search/code?q=PlanningPermissions+repo:o/svc'"))
+      assert.isTrue(gh('gh api --hostname h repos/o/svc/git/trees/main?recursive=1'))
+      assert.isTrue(gh('gh api --hostname h repos/o/svc/contents/a.php?ref=main'))
+      assert.isTrue(safeGhCommand('gh api repos/o/svc/contents/a', ['github.com/o/svc']))
+    })
+
+    it('denies other repos, hosts, methods, outputs and shell syntax', () => {
+      for (const c of [
+        'gh api --hostname h repos/o/other/contents/a',
+        'gh api repos/o/svc/contents/a',
+        "gh api --hostname h 'search/code?q=x+repo:o/other'",
+        "gh api --hostname h 'search/code?q=x+repo:o/other+repo:o/svc'",
+        'gh api -X POST repos/o/svc/issues',
+        'gh api --hostname h repos/o/svc/issues -f title=x',
+        'gh api --hostname h repos/o/svc/contents/a --jq .content',
+        'gh api --hostname h repos/o/svc/contents/a --paginate',
+        'gh api --hostname h repos/o/svc/contents/a --input /etc/passwd',
+        'gh api --hostname h repos/o/svc/contents/../../other/contents/a',
+        'gh api --hostname h repos/o/svc/issues',
+        'gh api --hostname h graphql',
+        'gh api --hostname h repos/o/svc/contents/a repos/o/other/contents/a',
+        "gh api --hostname h repos/o/svc/contents/a -H 'Authorization: x'",
+        'gh api --hostname h repos/o/svc/contents/a; curl x',
+        'gh api --hostname h repos/o/svc/contents/$(id)',
+        'gh pr list',
+        'gh api',
+      ]) {
+        assert.isFalse(gh(c), c)
+      }
+    })
   })
 })

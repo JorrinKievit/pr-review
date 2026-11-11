@@ -3,6 +3,7 @@ import { type AgentFinding, type AgentOpinion, defaultSettings, type Decision, t
 import { Effect, Layer, Stream } from 'effect'
 import { KeyValueStore } from 'effect/persistence'
 import { Config } from '../src/Config.ts'
+import type { GitHubClient } from '../src/GitHub.ts'
 import { Opiner } from '../src/Opiner.ts'
 import { Sorter } from '../src/Sorter.ts'
 import { Store } from '../src/Store.ts'
@@ -60,12 +61,12 @@ const finding = (o: Partial<AgentFinding> = {}): AgentFinding => ({
   ...o,
 })
 
-const setup = (o: { reply?: AgentOpinion; show?: Record<string, string>; repos?: (typeof defaultSettings)['repos']; prs?: StackEntry[] } = {}) => {
+const setup = (o: { reply?: AgentOpinion; show?: Record<string, string>; repos?: (typeof defaultSettings)['repos']; prs?: StackEntry[]; fileAt?: GitHubClient['fileAt'] } = {}) => {
   const agent = fakeAgent(() => Effect.succeed(o.reply ?? { decisions: [{ decisionId: 'd1', authorCase: 'c', checked: 'looked', findings: [] }] }))
   const git = fakeGit({ files: [{ path: 'src/a.ts', additions: 3, deletions: 1 }], diff: 'diff --git a/src/a.ts\n+added', rules: ['AGENTS.md'], show: o.show ?? {} })
   const config = Config.layerTest({ cacheRoot: '/cache', settings: { ...defaultSettings, hosts: [ref.host], ...(o.repos ? { repos: o.repos } : {}) } })
   const layer = Opiner.layer.pipe(
-    Layer.provide([agent.layer, git.layer, fakeGitHub({ listOpenPrs: () => Effect.succeed(o.prs ?? stack) }), config, fakeSorter]),
+    Layer.provide([agent.layer, git.layer, fakeGitHub({ listOpenPrs: () => Effect.succeed(o.prs ?? stack), ...(o.fileAt ? { fileAt: o.fileAt } : {}) }), config, fakeSorter]),
     Layer.provide(Store.layerWith(KeyValueStore.layerMemory)),
   )
   const opine = Effect.gen(function* () {
@@ -157,6 +158,41 @@ describe('Opiner', () => {
       const [bad, good] = (yield* opine.pipe(Effect.provide(layer))).decisions[0]!.findings
       assert.deepStrictEqual([bad!.severity, bad!.verified, bad!.evidence.length], ['ask', false, 0])
       assert.deepStrictEqual([good!.severity, good!.verified, good!.evidence.map((e) => e.path)], ['should', true, ['src/a.ts']])
+    }))
+
+  it.effect('related repos are listed with how to read them', () =>
+    Effect.gen(function* () {
+      const { agent, layer, opine } = setup({ repos: { 'h/o/r': { related: [{ repo: 'h/o/svc', note: 'permissions' }] } } })
+      yield* opine.pipe(Effect.provide(layer))
+      assert.match(agent.calls[0]!.prompt, /# Related repos[^\n]*\nh\/o\/svc: permissions\n[\s\S]*gh api --hostname <host> -H 'Accept: application\/vnd\.github\.raw' repos\/<owner>\/<repo>\/contents\/<file>[\s\S]*git\/trees\/<branch>\?recursive=1[\s\S]*search\/code/)
+      assert.deepStrictEqual(agent.calls[0]!.related, ['h/o/svc'])
+    }))
+
+  it.effect('a related citation is checked through GitHub', () =>
+    Effect.gen(function* () {
+      const asked: string[] = []
+      const reply: AgentOpinion = {
+        decisions: [
+          {
+            decisionId: 'd1',
+            authorCase: 'c',
+            checked: null,
+            findings: [
+              finding({ evidence: [{ ref: 'related', repo: 'h/o/svc', path: 'app/X.php', line: 1, quote: 'enum Perm' }] }),
+              finding({ evidence: [{ ref: 'related', repo: 'h/o/unlisted', path: 'app/X.php', line: 1, quote: 'enum Perm' }] }),
+            ],
+          },
+        ],
+      }
+      const { layer, opine } = setup({
+        reply,
+        repos: { 'h/o/r': { related: [{ repo: 'h/o/svc', note: 'n' }] } },
+        fileAt: (o, r, p) => Effect.sync(() => (asked.push(`${o}/${r}:${p}`), 'enum Perm {}\n')),
+      })
+      const [ok, unlisted] = (yield* opine.pipe(Effect.provide(layer))).decisions[0]!.findings
+      assert.deepStrictEqual(asked, ['o/svc:app/X.php'])
+      assert.isTrue(ok!.verified)
+      assert.isFalse(unlisted!.verified)
     }))
 
   it.effect('cached per head: a second opine does not call the agent', () =>

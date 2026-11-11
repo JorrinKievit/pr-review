@@ -64,9 +64,9 @@ const fakeAgent = (o: { turn?: (say: Say, ask: Ask, text: string) => Promise<acp
   return { app, seen }
 }
 
-const run = <A>(agent: ReturnType<typeof fakeAgent>, f: (s: AcpSession) => Effect.Effect<A, AgentError>, a: AgentAccount = account, resume?: string) =>
+const run = <A>(agent: ReturnType<typeof fakeAgent>, f: (s: AcpSession) => Effect.Effect<A, AgentError>, a: AgentAccount = account, resume?: string, o?: { related?: ReadonlyArray<string> }) =>
   Effect.gen(function* () {
-    const session = yield* (yield* Acp).open(a, '/repo', resume)
+    const session = yield* (yield* Acp).open(a, '/repo', resume, o)
     return yield* f(session)
   }).pipe(Effect.scoped, Effect.provide(Acp.layerWith(() => Effect.succeed({ target: agent.app, output: () => '' }))))
 
@@ -103,6 +103,22 @@ describe('Acp', () => {
       })
       yield* run(agent, (s) => collect(s.prompt('go')))
       assert.deepStrictEqual(answers, [true, false, false])
+    }))
+
+  it.live('a related gh read is allowed in a review session, other gh calls are not', () =>
+    Effect.gen(function* () {
+      const answers: boolean[] = []
+      const agent = fakeAgent({
+        turn: async (_say, ask) => {
+          for (const c of ['gh api --hostname h repos/o/svc/contents/a.php', 'gh api --hostname h repos/o/other/contents/a.php', 'gh api -X DELETE repos/o/svc/contents/a.php', 'gh pr merge 1']) answers.push(await ask(c))
+          return 'end_turn'
+        },
+      })
+      yield* run(agent, (s) => collect(s.prompt('go')), account, undefined, { related: ['h/o/svc'] })
+      assert.deepStrictEqual(answers, [true, false, false, false])
+      answers.length = 0
+      yield* run(agent, (s) => collect(s.prompt('go')))
+      assert.deepStrictEqual(answers, [false, false, false, false])
     }))
 
   it.live('picks a read-only mode the agent offers, or the account mode, and the account model', () =>

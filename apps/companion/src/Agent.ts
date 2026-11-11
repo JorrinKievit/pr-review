@@ -5,7 +5,7 @@ import { Acp } from './Acp.ts'
 import { Config } from './Config.ts'
 
 export type RunLog = { kind: 'sort' | 'ask' | 'chat' | 'overview' | 'opinion' | 'deeper' | 'stack-opinion' | 'ticket' | 'rule'; owner: string; repo: string; number: number; headSha: string }
-type Run = { prompt: string; cwd: string; log: RunLog; onStep?: (step: string) => Effect.Effect<void> }
+type Run = { prompt: string; cwd: string; related?: ReadonlyArray<string>; log: RunLog; onStep?: (step: string) => Effect.Effect<void> }
 
 
 const LIMITED = /usage limit|rate.?limit|quota|too many requests|\b429\b|limit reached|hit your limit|resets? (at|in)/i
@@ -139,7 +139,7 @@ export class Agent extends Context.Service<
         structured: (o) =>
           withAccount(o, (a) =>
             Effect.gen(function* () {
-              const session = yield* acp.open(a, o.cwd)
+              const session = yield* acp.open(a, o.cwd, undefined, o.related ? { related: o.related } : undefined)
               yield* step(o, `${a.name} is reading the PR`)
               const ask = (text: string) =>
                 session.prompt(text).pipe(Stream.runFoldEffect(() => '', (acc, u) => (u._tag === 'Text' ? Effect.succeed(acc + u.delta) : Effect.as(step(o, u.step), acc))))

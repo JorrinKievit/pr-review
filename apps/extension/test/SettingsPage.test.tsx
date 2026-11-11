@@ -67,3 +67,25 @@ test('storage that fails still shows the settings', async () => {
   setup({ storageFails: true })
   expect(await screen.findByLabelText('Hosts', {}, { timeout: 8000 })).toHaveValue('github.com')
 }, 10_000)
+
+test('adds a repo with a related repo and a review skill', async () => {
+  const { storage } = setup({ stored: defaultSettings })
+  await userEvent.click(await screen.findByRole('button', { name: 'Add repo' }))
+  await userEvent.type(screen.getByLabelText('Repo'), 'github.com/o/r')
+  await userEvent.type(screen.getByLabelText('Related repos'), 'github.com/o/svc: owns the API spec')
+  await userEvent.type(screen.getByLabelText('Review skill'), '.agents/skills/review/SKILL.md')
+  await userEvent.click(screen.getByRole('button', { name: 'Save' }))
+  await screen.findByText('Saved.', {}, { timeout: 3000 })
+  expect((storage.settings as Settings).repos).toEqual({
+    'github.com/o/r': { related: [{ repo: 'github.com/o/svc', note: 'owns the API spec' }], reviewSkill: '.agents/skills/review/SKILL.md' },
+  })
+})
+
+test('account checkboxes set tickets and deep', async () => {
+  const { storage } = setup({ stored: defaultSettings })
+  await userEvent.click(await screen.findByLabelText('Can read tickets'))
+  await userEvent.click(screen.getByLabelText('Use for Dig deeper'))
+  await userEvent.click(screen.getByRole('button', { name: 'Save' }))
+  await screen.findByText('Saved.', {}, { timeout: 3000 })
+  expect((storage.settings as Settings).accounts[0]).toMatchObject({ tickets: true, deep: true })
+})

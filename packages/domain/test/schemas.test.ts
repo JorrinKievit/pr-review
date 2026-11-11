@@ -1,6 +1,6 @@
 import { describe, expect, it } from '@effect/vitest'
 import { Schema } from 'effect'
-import { AgentSort, AskTarget, PrRef, ReviewRpcs, SortEvent, SortResult } from '../src/index.ts'
+import { AgentSort, AskTarget, defaultSettings, PrRef, repoSettings, ReviewRpcs, Settings, SortEvent, SortResult } from '../src/index.ts'
 
 const decision = {
   id: 'api-client',
@@ -49,4 +49,11 @@ describe('domain schemas', () => {
 it('a cached SortResult without a summary still decodes', () => {
   const old = { headSha: 'h', decisions: [], skim: [], trusted: [], claims: [], unclaimedDecisionIds: [], lines: { decision: 0, skim: 0, trusted: 0 } }
   expect(Schema.decodeUnknownSync(SortResult)(old)).toEqual(old)
+})
+
+it('settings saved before phase 2 still decode', () => {
+  const old = JSON.parse(JSON.stringify(defaultSettings))
+  const s = Schema.decodeUnknownSync(Settings)(old)
+  expect(s).toEqual(defaultSettings)
+  expect(repoSettings(s, 'h/o/r')).toEqual({ related: [] })
 })

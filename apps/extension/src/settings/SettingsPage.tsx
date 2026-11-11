@@ -90,7 +90,7 @@ function AccountCard(props: { account: AgentAccount; status: AccountStatus | und
           <Field label="Model" hint="Agent default if empty">
             <Input className="font-mono text-sm" value={a.model ?? ''} onChange={(e) => setOptional('model', e.target.value)} />
           </Field>
-          <Field label="Fast model" hint="For sorting and simpler decisions">
+          <Field label="Fast model" hint="For low-impact decisions and ticket reads">
             <Input className="font-mono text-sm" value={a.fastModel ?? ''} onChange={(e) => setOptional('fastModel', e.target.value)} />
           </Field>
           <Field label="At once">
@@ -224,7 +224,17 @@ export function SettingsPage() {
               </select>
             </Field>
             <Field label="Small PR threshold (changed lines)" hint="Below this one quick read replaces the piles. Tests, generated files and lockfiles don't count.">
-              <Input type="number" min={0} value={smallPrLines(settings)} onChange={(e) => setReview({ smallPrLines: Number(e.target.value) || 0 })} />
+              <Input
+                type="number"
+                min={0}
+                value={review.smallPrLines ?? ''}
+                placeholder={String(smallPrLines(defaultSettings))}
+                onChange={(e) => {
+                  // Empty means the default, not 0 (which turns the quick read off).
+                  const { smallPrLines: _, ...rest } = review
+                  setSettings({ ...settings, review: e.target.value === '' ? rest : { ...review, smallPrLines: Number(e.target.value) } })
+                }}
+              />
             </Field>
           </div>
         </div>

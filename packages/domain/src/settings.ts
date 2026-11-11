@@ -20,7 +20,7 @@ export const AgentAccount = Schema.Struct({
   tickets: Schema.optionalKey(Schema.Boolean),
   /** Strongest model, used for Dig deeper. */
   deep: Schema.optionalKey(Schema.Boolean),
-  /** Cheaper model for the quick pass of a small PR. */
+  /** Cheaper model for low-impact decisions and ticket reads. */
   fastModel: Schema.optionalKey(Schema.String),
 })
 export type AgentAccount = typeof AgentAccount.Type

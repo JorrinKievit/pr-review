@@ -1,4 +1,4 @@
-import { type AccountStatus, defaultSettings, type Settings } from '@pr-review/domain'
+import { type AccountStatus, defaultSettings, type Settings, smallPrLines } from '@pr-review/domain'
 import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { Effect, Exit, Layer, Scope } from 'effect'
@@ -93,9 +93,8 @@ test('account checkboxes set tickets and deep', async () => {
 test("saves Claude's opinion mode, the small PR threshold and a fast model", async () => {
   const { storage } = setup({ stored: defaultSettings })
   expect(await screen.findByLabelText(/^Claude's opinion/, {}, { timeout: 3000 })).toHaveValue('automatic')
-  expect(screen.getByLabelText(/^Small PR threshold/)).toHaveValue(200)
+  expect(screen.getByLabelText(/^Small PR threshold/)).toHaveAttribute('placeholder', '200')
   await userEvent.selectOptions(screen.getByLabelText(/^Claude's opinion/), 'on-demand')
-  await userEvent.clear(screen.getByLabelText(/^Small PR threshold/))
   await userEvent.type(screen.getByLabelText(/^Small PR threshold/), '120')
   await userEvent.type(screen.getByLabelText(/^Fast model/), 'haiku')
   await userEvent.click(screen.getByRole('button', { name: 'Save' }))
@@ -103,4 +102,15 @@ test("saves Claude's opinion mode, the small PR threshold and a fast model", asy
   const saved = storage.settings as Settings
   expect(saved.review).toMatchObject({ opinions: 'on-demand', smallPrLines: 120 })
   expect(saved.accounts[0]).toMatchObject({ fastModel: 'haiku' })
+})
+
+test('clearing the small PR threshold goes back to the default', async () => {
+  const { storage } = setup({ stored: { ...defaultSettings, review: { ...defaultSettings.review, smallPrLines: 50 } } })
+  expect(await screen.findByLabelText(/^Small PR threshold/, {}, { timeout: 3000 })).toHaveValue(50)
+  await userEvent.clear(screen.getByLabelText(/^Small PR threshold/))
+  await userEvent.click(screen.getByRole('button', { name: 'Save' }))
+  await screen.findByText('Saved.', {}, { timeout: 3000 })
+  const saved = storage.settings as Settings
+  expect(saved.review).not.toHaveProperty('smallPrLines')
+  expect(smallPrLines(saved)).toBe(200)
 })

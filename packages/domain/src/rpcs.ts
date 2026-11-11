@@ -94,6 +94,6 @@ export class ReviewRpcs extends RpcGroup.make(
       body: Schema.String,
       commitId: Schema.String,
     },
-    error: Schema.Union([RepoNotConfigured, ReviewRejected, GitHubError, CompanionUnavailable]),
+    error: Schema.Union([RepoNotConfigured, ReviewRejected, GitHubError, GitError, CompanionUnavailable]),
   }),
 ) {}

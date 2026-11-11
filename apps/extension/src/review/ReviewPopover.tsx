@@ -49,7 +49,7 @@ export function ReviewPopover({ prRef, pr, onSent, ...control }: { prRef: PrRef;
     const e = errorOf(exit.cause) as { _tag?: string; message?: string } | undefined
     setError(
       e?._tag === 'ReviewRejected'
-        ? `GitHub refused the review: ${e.message}. A commented line may be gone from the PR. Your comments are kept.`
+        ? `${e.message}. Your comments are kept.`
         : 'The review was not sent. Your comments are kept. Try again.',
     )
   }

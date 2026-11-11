@@ -201,7 +201,7 @@ const renderPage = (
         }),
       SubmitReview: (p) =>
         o.refuseReview
-          ? Effect.fail(new ReviewRejected({ message: 'Validation Failed' }))
+          ? Effect.fail(new ReviewRejected({ message: 'GitHub refused the review: Validation Failed. A commented line may be gone from the PR' }))
           : Effect.sync(() => {
               reviews.push({ ...p, comments: drafts })
               drafts = []

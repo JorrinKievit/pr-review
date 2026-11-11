@@ -105,7 +105,7 @@ export class Reviewer extends Context.Service<
           .session(options, (turns, account) =>
             Effect.andThen(
               t.worker('quick', 0, (w) => ({ ...w, account: account.name })),
-              turns.structured(prompt, AgentQuick, 'main', 'sort'),
+              turns.structured(prompt, AgentQuick, 'fast', 'sort'),
             ),
           )
           .pipe(Effect.onError(() => t.end('quick', 'failed')))

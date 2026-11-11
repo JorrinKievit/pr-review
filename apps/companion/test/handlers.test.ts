@@ -11,6 +11,7 @@ import { Config } from '../src/Config.ts'
 import { Git } from '../src/Git.ts'
 import { CompanionRpcs, HandlersLive, LoggedLive } from '../src/handlers.ts'
 import { Opiner } from '../src/Opiner.ts'
+import { contentIds } from '../src/opinionContext.ts'
 import { Overview } from '../src/Overview.ts'
 import { Sorter } from '../src/Sorter.ts'
 import { StackOpiner } from '../src/StackOpiner.ts'
@@ -50,15 +51,16 @@ const opinionReply: AgentOpinion = {
 const opinionCalls = (calls: ReadonlyArray<{ log: { kind: string } }>) => calls.filter((c) => c.log.kind === 'opinion').length
 
 const setup = (
-  o: { delay?: number; overviewFails?: string; github?: Parameters<typeof fakeGitHub>[0]; sorts?: ReadonlyArray<AgentSort>; files?: FileStat[]; diff?: NonNullable<Parameters<typeof fakeGit>[0]>['diff']; git?: ReturnType<typeof fakeGit> } = {},
+  o: { delay?: number; overviewFails?: string; github?: Parameters<typeof fakeGitHub>[0]; sorts?: ReadonlyArray<AgentSort>; files?: FileStat[]; diff?: NonNullable<Parameters<typeof fakeGit>[0]>['diff']; git?: ReturnType<typeof fakeGit>; opinions?: ReadonlyArray<AgentOpinion> } = {},
 ) => {
   let sorted = 0
+  let opined = 0
   const agent = fakeAgent((call) =>
     call.log.kind === 'overview' && o.overviewFails
       ? Effect.fail(new AgentError({ message: o.overviewFails }))
       : Effect.as(
           o.delay ? Effect.sleep(o.delay) : Effect.void,
-          call.log.kind === 'overview' ? overviewReply : call.log.kind === 'stack-opinion' ? { findings: [] } : call.log.kind === 'opinion' || call.log.kind === 'deeper' ? opinionReply : (o.sorts?.[sorted++] ?? sortReply),
+          call.log.kind === 'overview' ? overviewReply : call.log.kind === 'stack-opinion' ? { findings: [] } : call.log.kind === 'opinion' || call.log.kind === 'deeper' ? (o.opinions?.[opined++] ?? opinionReply) : (o.sorts?.[sorted++] ?? sortReply),
         ),
   )
   const deps = Layer.mergeAll(agent.layer, (o.git ?? fakeGit({ files: o.files ?? files, diff: o.diff ?? 'd' })).layer, fakeGitHub({ listOpenPrs: () => Effect.succeed([entry(7, 'master', 'feat')]), ...o.github }), configLayer())
@@ -364,11 +366,12 @@ describe('handlers', () => {
     Effect.gen(function* () {
       const { agent, client } = setup({ delay: 100, sorts: [{ decisions: [d1], skim: [], claims: [] }] })
       const c = yield* client
-      yield* c.SetFindingState({ ref, headSha: 'HEAD1', findingId: 'd1:0', state: 'posted' })
+      const id = contentIds('d1:', ['f\nt'])[0]!
+      yield* c.SetFindingState({ ref, headSha: 'HEAD1', findingId: id, state: 'posted' })
       const events = yield* Stream.runCollect(c.Opinion({ ref, headSha: 'HEAD1', run: true }))
       assert.deepStrictEqual([...new Set(tags(events))], ['Running', 'Done'])
       const done = events.at(-1)!
-      assert.deepStrictEqual(done._tag === 'Done' && [done.opinion.decisions[0]!.findings[0]!.id, done.states], ['d1:0', { 'd1:0': 'posted' }])
+      assert.deepStrictEqual(done._tag === 'Done' && [done.opinion.decisions[0]!.findings[0]!.id, done.states], [id, { [id]: 'posted' }])
       // Cached now: a page opening later gets it without asking for a run.
       assert.deepStrictEqual(tags(yield* Stream.runCollect(c.Opinion({ ref, headSha: 'HEAD1', run: false }))), ['Done'])
       assert.strictEqual(opinionCalls(agent.calls), 1)
@@ -400,6 +403,29 @@ describe('handlers', () => {
       assert.deepStrictEqual(done._tag === 'Done' && done.opinion.stackHeads, { 8: 'sha8-new' })
     }).pipe(Effect.scoped))
 
+  it.effect('a re-run with different findings does not inherit a dismissed state', () =>
+    Effect.gen(function* () {
+      let above = 'sha8'
+      const [first] = opinionReply.decisions
+      const other: AgentOpinion = { decisions: [{ ...first!, findings: [{ ...first!.findings[0]!, title: 'other', take: 'another' }] }] }
+      const { client } = setup({
+        sorts: [{ decisions: [d1], skim: [], claims: [] }],
+        opinions: [opinionReply, other],
+        github: { listOpenPrs: () => Effect.sync(() => [entry(7, 'master', 'feat'), { ...entry(8, 'feat', 'feat2'), headSha: above }]) },
+      })
+      const c = yield* client
+      const run = Effect.map(Stream.runCollect(c.Opinion({ ref, headSha: 'HEAD1', run: true })), (e) => e.at(-1)!)
+      const before = yield* run
+      const dismissed = before._tag === 'Done' ? before.opinion.decisions[0]!.findings[0]!.id : ''
+      yield* c.SetFindingState({ ref, headSha: 'HEAD1', findingId: dismissed, state: 'dismissed' })
+      above = 'sha8-new'
+      const after = yield* run
+      assert.isTrue(after._tag === 'Done')
+      const fresh = after._tag === 'Done' ? after.opinion.decisions[0]!.findings[0]!.id : ''
+      assert.notStrictEqual(fresh, dismissed)
+      assert.isUndefined(after._tag === 'Done' ? after.states[fresh] : 'not done')
+    }).pipe(Effect.scoped))
+
   it.effect('SetFindingState saves and clears', () =>
     Effect.gen(function* () {
       const c = yield* setup().client
@@ -416,7 +442,7 @@ describe('handlers', () => {
       const c = yield* setup({ sorts: [{ decisions: [d1], skim: [], claims: [] }], github: { listOpenPrs: () => Effect.succeed([entry(7, 'master', 'feat'), entry(8, 'feat', 'feat2')]) } }).client
       yield* Stream.runCollect(c.Opinion({ ref, headSha: 'sha7', run: true }))
       const last = (yield* Stream.runCollect(c.Stack({ ref }))).at(-1)!
-      assert.deepStrictEqual(last.entries.map((e) => e.opinion?.decisions[0]?.findings[0]?.id), ['d1:0', undefined])
+      assert.deepStrictEqual(last.entries.map((e) => e.opinion?.decisions[0]?.findings[0]?.id), [contentIds('d1:', ['f\nt'])[0], undefined])
       assert.notProperty(last.entries[1]!, 'opinion')
     }).pipe(Effect.scoped))
 

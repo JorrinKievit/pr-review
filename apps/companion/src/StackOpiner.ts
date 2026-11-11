@@ -7,8 +7,8 @@ import { checkFinding } from './citations.ts'
 import { Config } from './Config.ts'
 import { Git } from './Git.ts'
 import { GitHub } from './GitHub.ts'
-import { Opiner } from './Opiner.ts'
-import { citationReader, describePr, guidanceSection, relatedSection, ticketSection } from './opinionContext.ts'
+import { anchorHunks, anchorIn, Opiner } from './Opiner.ts'
+import { citationReader, contentIds, describePr, guidanceSection, relatedSection, ticketSection } from './opinionContext.ts'
 import { type SortError, Sorter } from './Sorter.ts'
 import { buildStack } from './stack.ts'
 import { makeSteps } from './steps.ts'
@@ -122,10 +122,19 @@ export class StackOpiner extends Context.Service<
         yield* report('Checking the citations')
         const byPr = new Map(prs.map((p) => [p.entry.number, p]))
         const order = prs.map((p) => p.entry.number)
+        const kept = answer.findings.filter((f) => byPr.has(f.pr))
+        const ids = contentIds('stack:', kept.map((f) => `${f.pr}\n${f.title}\n${f.take}`))
+        const hunks = new Map(
+          yield* Effect.forEach(prs, (p) =>
+            Effect.map(
+              anchorHunks(git, repoKey, p.mergeBase, p.entry.headSha, p.files, kept.flatMap((f) => (f.pr === p.entry.number && f.anchor ? [f.anchor.path] : []))),
+              (h) => [p.entry.number, h] as const,
+            ),
+          ),
+        )
         const findings = yield* Effect.forEach(
-          answer.findings.filter((f) => byPr.has(f.pr)),
+          kept,
           (f, i) => {
-            const pr = byPr.get(f.pr)!
             const at = (e: Evidence) => {
               const p = byPr.get(e.pr ?? f.pr)
               return p && (e.ref === 'head' ? p.entry.headSha : p.mergeBase)
@@ -134,10 +143,10 @@ export class StackOpiner extends Context.Service<
               checkFinding(f, citationReader(git, github, repoKey, related, at)),
               (checked): Finding => ({
                 ...checked,
-                id: `stack:${i}`,
+                id: ids[i]!,
                 pr: f.pr,
                 decisionId: null,
-                anchor: checked.anchor && pr.files.some((x) => x.path === checked.anchor!.path) ? checked.anchor : null,
+                anchor: anchorIn(hunks.get(f.pr)!, checked.anchor),
                 handledIn: checked.handledIn !== null && order.indexOf(checked.handledIn) > order.indexOf(f.pr) ? checked.handledIn : null,
               }),
             )

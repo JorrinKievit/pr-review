@@ -9,6 +9,7 @@ import { Sorter } from '../src/Sorter.ts'
 import { StackOpiner } from '../src/StackOpiner.ts'
 import { Store } from '../src/Store.ts'
 import { Tickets } from '../src/Tickets.ts'
+import { contentIds } from '../src/opinionContext.ts'
 import { fakeAgent, fakeGit, fakeGitHub, overviewReply, ref } from './fakes.ts'
 
 const entry = (number: number, baseRef: string, headRef: string, headSha = `sha${number}`): StackEntry => ({ number, title: `PR ${number}`, baseRef, headRef, headSha })
@@ -67,7 +68,7 @@ function finding(o: Partial<AgentFinding> = {}): AgentFinding {
 
 const setup = (o: { reply?: AgentStackOpinion; prs?: () => StackEntry[]; show?: Record<string, string> } = {}) => {
   const agent = fakeAgent((call) => Effect.succeed(call.log.kind === 'overview' ? overviewReply : (o.reply ?? { findings: [] })))
-  const git = fakeGit({ files: [{ path: 'src/a.ts', additions: 3, deletions: 1 }], rules: ['AGENTS.md'], show: o.show ?? {} })
+  const git = fakeGit({ files: [{ path: 'src/a.ts', additions: 3, deletions: 1 }], diff: 'diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1,2 +1,3 @@\n+x', rules: ['AGENTS.md'], show: o.show ?? {} })
   const config = Config.layerTest({ cacheRoot: '/cache', settings: { ...defaultSettings, hosts: [ref.host], repos: { 'h/o/r': { related: [{ repo: 'h/o/svc', note: 'permissions' }] } } } })
   const layer = Layer.mergeAll(StackOpiner.layer, Overview.layer).pipe(
     Layer.provide([
@@ -136,12 +137,14 @@ describe('StackOpiner', () => {
       const { layer, opine } = setup({ reply, show: { 'sha8:src/a.ts': 'const x = 1\n' } })
       const o = yield* opine.pipe(Effect.provide(layer))
       assert.deepStrictEqual(o.heads, { 6: 'sha6', 7: 'sha7', 8: 'sha8' })
-      assert.deepStrictEqual(o.findings.map((f) => [f.id, f.title, f.pr, f.decisionId]), [['stack:0', 'drift', 7, null], ['stack:1', 'scaffold', 6, null]])
+      assert.deepStrictEqual(o.findings.map((f) => [f.title, f.pr, f.decisionId]), [['drift', 7, null], ['scaffold', 6, null]])
+      assert.deepStrictEqual(o.findings.map((f) => f.id), contentIds('stack:', ['7\ndrift\nt', '6\nscaffold\nt']))
       const [drift, scaffold] = o.findings
       // Evidence is read at the head of the PR it names, else the finding's PR.
       assert.deepStrictEqual([drift!.verified, scaffold!.verified], [true, false])
       assert.deepStrictEqual([drift!.handledIn, scaffold!.handledIn], [null, 8])
-      assert.deepStrictEqual([drift!.anchor, scaffold!.anchor], [{ path: 'src/a.ts', line: 4 }, null])
+      // Moved onto the diff's last line; a file outside the PR has none.
+      assert.deepStrictEqual([drift!.anchor, scaffold!.anchor], [{ path: 'src/a.ts', line: 3 }, null])
     }))
 
   it.effect('cached per set of heads', () =>

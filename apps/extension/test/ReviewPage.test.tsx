@@ -617,6 +617,19 @@ test('decision shows its findings with evidence and Use as comment saves a draft
   await waitFor(() => expect(stateCalls).toEqual([expect.objectContaining({ headSha: 'HEAD1', findingId: 'f2', state: 'posted' })]))
 })
 
+test('a finding without an anchor offers its comment to copy', async () => {
+  const writeText = vi.fn(async (_: string) => {})
+  Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+  const loose = { ...opinion, decisions: [decisionOpinion('one', [finding({ id: 'f1', decisionId: 'one', severity: 'ask', title: 'Name the timeout', comment: 'Name it?' })])] }
+  const { drafts } = renderPage({ opinion: { cached: loose } })
+  await openDecisionOne()
+  const card = screen.getByRole('region', { name: 'Name the timeout' })
+  expect(within(card).queryByRole('button', { name: 'Use as comment' })).toBeNull()
+  await userEvent.click(within(card).getByRole('button', { name: 'Copy comment' }))
+  expect(writeText).toHaveBeenCalledWith('Name it?')
+  expect(drafts()).toEqual([])
+})
+
 test('dismiss folds the finding away', async () => {
   const { stateCalls } = renderPage({ opinion: { cached: opinion } })
   await openDecisionOne()

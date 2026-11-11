@@ -8,7 +8,8 @@ import { Config } from './Config.ts'
 import { Git } from './Git.ts'
 import { GitHub } from './GitHub.ts'
 import { type SortError, Sorter } from './Sorter.ts'
-import { citationReader, describePr, guidanceSection, relatedSection, ticketSection } from './opinionContext.ts'
+import { hunkLines, nearestLine } from './interdiff.ts'
+import { citationReader, contentIds, describePr, guidanceSection, relatedSection, ticketSection } from './opinionContext.ts'
 import { buildStack } from './stack.ts'
 import { Tickets } from './Tickets.ts'
 import { makeSteps } from './steps.ts'
@@ -20,32 +21,53 @@ type Heads = Record<string, string>
 const headsOf = (prs: ReadonlyArray<StackEntry>): Heads => Object.fromEntries(prs.map((p) => [p.number, p.headSha]))
 const sameHeads = (a: Heads, b: Heads) => Object.keys(a).length === Object.keys(b).length && Object.entries(a).every(([n, sha]) => b[n] === sha)
 
-/** Keeps what the sort and the stack can back up: known decisions, PR anchors, `handledIn` above this PR, citations that hold. */
+/**
+ * Keeps what the sort and the stack can back up: the first answer per known decision, `handledIn` above this PR,
+ * citations that hold, and anchors on a line of the PR's diff (`hunks`) so a drafted comment can be posted.
+ */
 const normalize = (
   answer: AgentOpinion,
-  o: { number: number; sort: SortResult; files: ReadonlyArray<FileStat>; above: ReadonlyArray<number>; read: (e: Evidence) => Effect.Effect<string | undefined> },
+  o: { number: number; sort: SortResult; deep: boolean; hunks: Hunks; above: ReadonlyArray<number>; read: (e: Evidence) => Effect.Effect<string | undefined> },
 ) => {
   const decisions = new Map(o.sort.decisions.map((d) => [d.id, d]))
-  const prPaths = new Set(o.files.map((f) => f.path))
+  const seen = new Set<string>()
   return Effect.forEach(
-    answer.decisions.filter((a) => decisions.has(a.decisionId)),
+    answer.decisions.filter((a) => decisions.has(a.decisionId) && !seen.has(a.decisionId) && seen.add(a.decisionId)),
     (a) =>
       Effect.gen(function* () {
         const first = decisions.get(a.decisionId)!.files[0]
-        const fallback = first ? { path: first.path, line: first.ranges[0]?.start ?? 1 } : null
+        const fallback = first?.ranges[0] && { path: first.path, line: first.ranges[0].start }
+        const fallbackAnchor = fallback && anchorIn(o.hunks, fallback)?.line === fallback.line ? fallback : null
+        const ids = contentIds(o.deep ? `${a.decisionId}:deep:` : `${a.decisionId}:`, a.findings.map((f) => `${f.title}\n${f.take}`))
         const findings = yield* Effect.forEach(a.findings, (f, i) =>
           Effect.map(checkFinding(f, o.read), (checked) => ({
             ...checked,
-            id: `${a.decisionId}:${i}`,
+            id: ids[i]!,
             pr: o.number,
             decisionId: a.decisionId,
-            anchor: checked.anchor && prPaths.has(checked.anchor.path) ? checked.anchor : fallback,
+            anchor: anchorIn(o.hunks, checked.anchor) ?? fallbackAnchor,
             handledIn: checked.handledIn !== null && o.above.includes(checked.handledIn) ? checked.handledIn : null,
           })),
         )
-        return { decisionId: a.decisionId, authorCase: a.authorCase, checked: a.checked, findings, deep: false } satisfies DecisionOpinion
+        return { decisionId: a.decisionId, authorCase: a.authorCase, checked: a.checked, findings, deep: o.deep } satisfies DecisionOpinion
       }),
   )
+}
+
+type Hunks = ReturnType<typeof hunkLines>
+type Anchor = { path: string; line: number }
+
+/** The anchor moved to the nearest line of its file's diff, or null when its file has none. */
+export const anchorIn = (hunks: Hunks, anchor: Anchor | null): Anchor | null => {
+  const line = anchor ? nearestLine(hunks.get(anchor.path) ?? [], anchor.line) : undefined
+  return line === undefined ? null : { path: anchor!.path, line }
+}
+
+/** New-side diff lines of the files the answer's anchors (or their fallbacks) sit in. */
+export const anchorHunks = (git: Git['Service'], repoKey: string, mergeBase: string, head: string, files: ReadonlyArray<FileStat>, paths: ReadonlyArray<string>) => {
+  const wanted = new Set(paths)
+  const asked = files.filter((f) => wanted.has(f.path)).flatMap((f) => (f.previous ? [f.previous, f.path] : [f.path]))
+  return asked.length ? Effect.map(git.diff(repoKey, mergeBase, head, asked), hunkLines) : Effect.succeed<Hunks>(new Map())
 }
 
 export class Opiner extends Context.Service<
@@ -159,7 +181,9 @@ export class Opiner extends Context.Service<
         })
         yield* report('Checking the citations')
         const read = citationReader(git, github, repoKey, related, (e) => (e.ref === 'base' ? mergeBase : head))
-        const decisions = yield* normalize(answer, { number, sort, files, above: above.map((e) => e.number), read })
+        const anchorPaths = [...answer.decisions.flatMap((a) => a.findings.flatMap((f) => (f.anchor ? [f.anchor.path] : []))), ...sort.decisions.flatMap((d) => d.files.slice(0, 1).map((f) => f.path))]
+        const hunks = yield* anchorHunks(git, repoKey, mergeBase, head, files, anchorPaths)
+        const decisions = yield* normalize(answer, { number, sort, deep: only !== undefined, hunks, above: above.map((e) => e.number), read })
         return { headSha: head, ticket: ticket.text, ticketNote: ticket.note, decisions, stackHeads: headsOf(above) } satisfies PrOpinion
       })
 
@@ -167,7 +191,7 @@ export class Opiner extends Context.Service<
       const runDeeper = (key: DeeperKey) =>
         Effect.flatMap(analyse(key, key.decisionId), (o) => {
           const d = o.decisions.find((x) => x.decisionId === key.decisionId)
-          return d ? Effect.succeed({ ...d, deep: true }) : Effect.fail(new AgentError({ message: `The agent gave no opinion on decision ${key.decisionId}` }))
+          return d ? Effect.succeed(d) : Effect.fail(new AgentError({ message: `The agent gave no opinion on decision ${key.decisionId}` }))
         })
       const cache = yield* PersistedCache.make(run, { storeId: 'opinion', ...cacheOptions })
       const deeperCache = yield* PersistedCache.make(runDeeper, { storeId: 'deeper', ...cacheOptions })

@@ -2,6 +2,7 @@ import { useAtomRefresh, useAtomSet, useAtomValue } from '@effect/atom-react'
 import { type DecisionOpinion, type Finding, type FindingStates, type PrRef, rankFindings, type Severity } from '@pr-review/domain'
 import { AsyncResult } from 'effect/reactivity'
 import { useState } from 'react'
+import { toast } from 'sonner'
 import { useAtoms } from '../atoms.ts'
 import { cn } from '../lib/utils.ts'
 import { failureOf } from '../result.ts'
@@ -180,11 +181,16 @@ function FindingCard(props: { prRef: PrRef; headSha: string; finding: Finding; s
           </>
         ) : (
           <>
-            {f.anchor && f.comment && (
-              <Button size="xs" variant="outline" onClick={post}>
-                Use as comment
-              </Button>
-            )}
+            {f.comment &&
+              (f.anchor ? (
+                <Button size="xs" variant="outline" onClick={post}>
+                  Use as comment
+                </Button>
+              ) : (
+                <Button size="xs" variant="outline" onClick={() => void navigator.clipboard.writeText(f.comment!).then(() => toast('Copied'))}>
+                  Copy comment
+                </Button>
+              ))}
             <Button size="xs" variant="ghost" onClick={() => setState(f.id, 'dismissed')}>
               Dismiss
             </Button>

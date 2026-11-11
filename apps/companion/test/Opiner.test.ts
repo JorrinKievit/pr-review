@@ -5,6 +5,7 @@ import { KeyValueStore } from 'effect/persistence'
 import { Config } from '../src/Config.ts'
 import type { GitHubClient } from '../src/GitHub.ts'
 import { Opiner } from '../src/Opiner.ts'
+import { contentIds } from '../src/opinionContext.ts'
 import { Sorter } from '../src/Sorter.ts'
 import { Store } from '../src/Store.ts'
 import { type TicketSummary, Tickets } from '../src/Tickets.ts'
@@ -62,9 +63,9 @@ const finding = (o: Partial<AgentFinding> = {}): AgentFinding => ({
   ...o,
 })
 
-const setup = (o: { reply?: AgentOpinion | ((kind: string) => AgentOpinion); show?: Record<string, string>; repos?: (typeof defaultSettings)['repos']; prs?: StackEntry[]; fileAt?: GitHubClient['fileAt']; ticket?: TicketSummary } = {}) => {
+const setup = (o: { reply?: AgentOpinion | ((kind: string) => AgentOpinion); show?: Record<string, string>; repos?: (typeof defaultSettings)['repos']; prs?: StackEntry[]; fileAt?: GitHubClient['fileAt']; ticket?: TicketSummary; diff?: string } = {}) => {
   const agent = fakeAgent((call) => Effect.succeed((typeof o.reply === 'function' ? o.reply(call.log.kind) : o.reply) ?? { decisions: [{ decisionId: 'd1', authorCase: 'c', checked: 'looked', findings: [] }] }))
-  const git = fakeGit({ files: [{ path: 'src/a.ts', additions: 3, deletions: 1 }], diff: 'diff --git a/src/a.ts\n+added', rules: ['AGENTS.md'], show: o.show ?? {} })
+  const git = fakeGit({ files: [{ path: 'src/a.ts', additions: 3, deletions: 1 }], diff: o.diff ?? 'diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1,2 +1,9 @@\n+added', rules: ['AGENTS.md'], show: o.show ?? {} })
   const config = Config.layerTest({ cacheRoot: '/cache', settings: { ...defaultSettings, hosts: [ref.host], ...(o.repos ? { repos: o.repos } : {}) } })
   const layer = Opiner.layer.pipe(
     Layer.provide([agent.layer, git.layer, fakeGitHub({ listOpenPrs: () => Effect.succeed(o.prs ?? stack), ...(o.fileAt ? { fileAt: o.fileAt } : {}) }), config, fakeSorter, Layer.succeed(Tickets, Tickets.of({ summary: () => Effect.succeed(o.ticket ?? { text: null, note: 'No ticket reference found' }) }))]),
@@ -130,26 +131,55 @@ describe('Opiner', () => {
       assert.match(agent.calls[0]!.prompt, /#8 PR 8 \(head sha8\)\n {2}src\/a\.ts/)
     }))
 
-  it.effect('drops opinions for unknown decisions and handledIn below this PR', () =>
+  it.effect('drops opinions for unknown decisions, repeats of a decision and handledIn below this PR', () =>
     Effect.gen(function* () {
       const reply: AgentOpinion = {
         decisions: [
           { decisionId: 'd1', authorCase: 'c', checked: null, findings: [finding({ handledIn: 6 }), finding({ handledIn: 8, anchor: { path: 'src/elsewhere.ts', line: 9 } })] },
           { decisionId: 'made-up', authorCase: 'c', checked: null, findings: [finding()] },
+          { decisionId: 'd1', authorCase: 'second answer', checked: null, findings: [finding()] },
         ],
       }
       const { layer, opine } = setup({ reply })
       const o = yield* opine.pipe(Effect.provide(layer))
-      assert.deepStrictEqual(o.decisions.map((d) => d.decisionId), ['d1'])
+      assert.deepStrictEqual(o.decisions.map((d) => [d.decisionId, d.authorCase]), [['d1', 'c']])
       const [a, b] = o.decisions[0]!.findings
       assert.deepStrictEqual([a!.handledIn, b!.handledIn], [null, 8])
-      assert.deepStrictEqual([a!.id, b!.id], ['d1:0', 'd1:1'])
+      // Same content, same id stem; a repeat in one run is numbered.
+      assert.deepStrictEqual([a!.id, b!.id], [contentIds('d1:', ['f\nt'])[0], `${contentIds('d1:', ['f\nt'])[0]}-2`])
       assert.deepStrictEqual([a!.pr, a!.decisionId], [7, 'd1'])
       // An anchor outside the PR's files moves to the decision's first file.
       assert.deepStrictEqual([a!.anchor, b!.anchor], [{ path: 'src/a.ts', line: 4 }, { path: 'src/a.ts', line: 3 }])
       assert.deepStrictEqual(o.stackHeads, { 8: 'sha8' })
       assert.deepStrictEqual([o.headSha, o.ticket, o.ticketNote], ['HEAD1', null, 'No ticket reference found'])
       assert.isFalse(o.decisions[0]!.deep)
+    }))
+
+  it.effect('anchors land on a line of the diff, or nowhere', () =>
+    Effect.gen(function* () {
+      const reply: AgentOpinion = {
+        decisions: [
+          {
+            decisionId: 'd1',
+            authorCase: 'c',
+            checked: null,
+            findings: [
+              finding({ title: 'in', anchor: { path: 'src/a.ts', line: 12 } }),
+              finding({ title: 'past', anchor: { path: 'src/a.ts', line: 40 } }),
+              finding({ title: 'between', anchor: { path: 'src/a.ts', line: 25 } }),
+              finding({ title: 'none', anchor: null }),
+            ],
+          },
+        ],
+      }
+      const hunks = '@@ -10,3 +10,4 @@\n x\n+y\n x\n x\n@@ -30,2 +31,2 @@\n-a\n+b\n x'
+      const at = (hunks: string) => {
+        const { layer, opine } = setup({ reply, diff: `diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n${hunks}` })
+        return Effect.map(Effect.provide(opine, layer), (o) => o.decisions[0]!.findings.map((f) => f.anchor?.line ?? null))
+      }
+      // The decision's range starts at line 3, outside these hunks, so a finding without an anchor gets none.
+      assert.deepStrictEqual(yield* at(hunks), [12, 32, 31, null])
+      assert.deepStrictEqual(yield* at('@@ -1,2 +1,9 @@\n+x'), [9, 9, 9, 3])
     }))
 
   it.effect('bad citations are dropped and severity lowered', () =>
@@ -232,6 +262,7 @@ describe('Opiner', () => {
         yield* opiner.opine(ref, 'HEAD1')
         const d = yield* opiner.deeper(ref, 'HEAD1', 'd2')
         assert.deepInclude(d, { decisionId: 'd2', deep: true })
+        assert.match(d.findings[0]!.id, /^d2:deep:/)
         assert.strictEqual(d.findings[0]!.title, 'deep d2')
         const merged = [yield* opiner.cached(ref, 'HEAD1'), yield* opiner.opine(ref, 'HEAD1')]
         for (const o of merged) assert.deepStrictEqual(o!.decisions.map((x) => [x.findings[0]!.title, x.deep]), [['first d1', false], ['deep d2', true]])

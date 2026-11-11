@@ -1,4 +1,5 @@
 import type { Evidence, FileStat, RelatedRepo, SortResult, StackEntry } from '@pr-review/domain'
+import { createHash } from 'node:crypto'
 import { Effect } from 'effect'
 import type { Git } from './Git.ts'
 import type { GitHub } from './GitHub.ts'
@@ -39,3 +40,14 @@ export const citationReader =
       Effect.orElseSucceed(() => undefined),
     )
   }
+
+/** Ids from a finding's content, so a state saved for one finding never lands on another; repeats in one run get -2, -3. */
+export const contentIds = (prefix: string, texts: ReadonlyArray<string>) => {
+  const seen = new Map<string, number>()
+  return texts.map((t) => {
+    const id = prefix + createHash('sha256').update(t).digest('hex').slice(0, 10)
+    const n = (seen.get(id) ?? 0) + 1
+    seen.set(id, n)
+    return n === 1 ? id : `${id}-${n}`
+  })
+}

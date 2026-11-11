@@ -282,11 +282,11 @@ describe('handlers', () => {
     Effect.gen(function* () {
       const decision = (id: string, path: string): Decision => ({ id, title: id, lens: 'architecture', reason: 'data-model', theme: 't', note: 'n', existing: null, authorWhy: null, files: [{ path, ranges: [] }] })
       const [base] = opinionReply.decisions
-      const reply: AgentOpinion = { decisions: ['a', 'b'].map((id) => ({ ...base!, decisionId: id, findings: [{ ...base!.findings[0]!, title: id }] })) }
+      const reply: AgentOpinion = { decisions: ['a', 'b'].map((id) => ({ ...base!, decisionId: id, findings: [{ ...base!.findings[0]!, title: id, anchor: { path: 'src/a.ts', line: 2 } }] })) }
       const { agent, client } = setup({
         files: [{ path: 'src/a.ts', additions: 1, deletions: 0 }, { path: 'src/b.ts', additions: 1, deletions: 0 }],
         // Between the two heads only b.ts changed.
-        diff: (_from, to, paths) => (to === 'HEAD2' && paths.includes('src/b.ts') ? 'changed' : 'd'),
+        diff: (_from, to, paths) => (to === 'HEAD2' && paths.includes('src/b.ts') ? 'changed' : 'diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1,3 @@\n+x'),
         sorts: [
           { decisions: [decision('a', 'src/a.ts'), decision('b', 'src/b.ts')], skim: [], claims: [] },
           { decisions: [decision('a-renamed', 'src/a.ts'), decision('b', 'src/b.ts')], skim: [], claims: [] },
@@ -298,6 +298,7 @@ describe('handlers', () => {
       yield* Stream.runCollect(c.Sort({ ref, headSha: 'HEAD1' }))
       const first = yield* last(c.Opinion({ ref, headSha: 'HEAD1', run: true }))
       const aId = first._tag === 'Done' ? first.opinion.decisions[0]!.findings[0]!.id : ''
+      assert.deepStrictEqual(first._tag === 'Done' && first.opinion.decisions[0]!.findings[0]!.anchor, { path: 'src/a.ts', line: 2 })
       yield* c.SetFindingState({ ref, headSha: 'HEAD1', findingId: aId, state: 'dismissed' })
       // Nothing to match against until the new head is sorted.
       assert.deepStrictEqual(tags(yield* Stream.runCollect(c.Opinion({ ref, headSha: 'HEAD2', run: false }))), ['Idle'])
@@ -309,6 +310,8 @@ describe('handlers', () => {
       // b's own change differs, so only a's opinion carries, under the new decision id, with its finding state.
       assert.deepStrictEqual(carried.opinion.decisions.map((d) => [d.decisionId, d.findings.map((f) => [f.id, f.decisionId])]), [['a-renamed', [[aId, 'a-renamed']]]])
       assert.deepStrictEqual(carried.states, { [aId]: 'dismissed' })
+      // Its old line may have moved, so it offers its comment to copy instead of a draft.
+      assert.isNull(carried.opinion.decisions[0]!.findings[0]!.anchor)
       assert.strictEqual(opinionCalls(agent.calls), 1)
       // Running replaces it.
       const ran = yield* last(c.Opinion({ ref, headSha: 'HEAD2', run: true }))

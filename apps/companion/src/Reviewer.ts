@@ -1,6 +1,6 @@
 import { type AgentAccount, type AgentError, AgentOpinion, AgentQuick, AgentSort, type Decision, impact, opinionsMode, type Phase, type PrOpinion, type PrRef, repoSettings, smallPrLines, type SortResult } from '@pr-review/domain'
 import { readFileSync } from 'node:fs'
-import { Clock, Context, Deferred, Effect, Fiber, Layer, Stream, SubscriptionRef } from 'effect'
+import { Clock, Context, Deferred, Effect, Exit, Fiber, Layer, Stream, SubscriptionRef } from 'effect'
 import { Agent, type AgentTurns, type SessionOptions } from './Agent.ts'
 import { Config } from './Config.ts'
 import { Git } from './Git.ts'
@@ -147,19 +147,44 @@ export class Reviewer extends Context.Service<
       })
 
       const work = Effect.fnUntraced(function* (ref: PrRef, headSha: string, t: Tracker) {
+        const automatic = opinionsMode(yield* config.settings) === 'automatic'
+        const [cachedSort, cachedOpinion] = yield* Effect.all([sorter.cached(ref, headSha), opiner.cached(ref, headSha)])
+        if (cachedSort && (cachedOpinion || !automatic)) return { sort: cachedSort, opinion: cachedOpinion ?? null } satisfies Review
+        if (cachedSort) return yield* prepared(ref, headSha, t, cachedSort, cachedOpinion)
+        // A sort started elsewhere (the stack page, say) is joined, so one head never has two sorts with different decision ids.
+        const claim = yield* sorter.claim(ref, headSha)
+        if ('running' in claim) return yield* prepared(ref, headSha, t, undefined, cachedOpinion, claim.running)
+        return yield* prepared(ref, headSha, t, undefined, cachedOpinion).pipe(Effect.onExit((exit) => claim.done(Exit.map(exit, (r) => r.sort))))
+      })
+
+      const prepared = Effect.fnUntraced(function* (
+        ref: PrRef,
+        headSha: string,
+        t: Tracker,
+        sortedEarlier: SortResult | undefined,
+        cachedOpinion: PrOpinion | undefined,
+        running?: Effect.Effect<SortResult, SortError>,
+      ) {
         const repoKey = `${ref.host}/${ref.owner}/${ref.repo}`
         const settings = yield* config.settings
         const automatic = opinionsMode(settings) === 'automatic'
-        const [cachedSort, cachedOpinion] = yield* Effect.all([sorter.cached(ref, headSha), opiner.cached(ref, headSha)])
-        if (cachedSort && (cachedOpinion || !automatic)) return { sort: cachedSort, opinion: cachedOpinion ?? null } satisfies Review
-
         yield* t.begin('fetch', `Fetching #${ref.number}`)
         const gh = yield* github.forHost(ref.host)
         const pr = yield* gh.getPr(ref.owner, ref.repo, ref.number)
         yield* t.begin('fetch', `Fetching #${ref.number}: ${pr.title}`)
         // Started now so the turn that needs it waits least; `opiner.context` joins the same lookup.
         const ticket = yield* Effect.forkChild(tickets.summary(ref, pr))
-        if (!cachedSort) {
+        let cachedSort = sortedEarlier
+        if (running) {
+          yield* t.end('fetch', 'done')
+          yield* t.begin('sort', `Sorting #${ref.number}: joining the sort already running`)
+          cachedSort = yield* running
+          yield* t.end('sort', 'done')
+          if (cachedOpinion || !automatic) {
+            yield* Fiber.interrupt(ticket)
+            return { sort: cachedSort, opinion: cachedOpinion ?? null } satisfies Review
+          }
+        } else if (!cachedSort) {
           const q = yield* quick(ref, headSha, t, ticket)
           if (q) return q
         }
@@ -169,7 +194,7 @@ export class Reviewer extends Context.Service<
         const contextFiber = wantOpinion ? yield* Effect.forkChild(opiner.context(ref, headSha)) : undefined
         const sortPrompt = cachedSort ? undefined : yield* sorter.prepare(ref, headSha)
         yield* t.end('fetch', 'done')
-        if (cachedSort) {
+        if (sortedEarlier) {
           yield* t.begin('sort', 'Sorted earlier')
           yield* t.end('sort', 'done')
         }

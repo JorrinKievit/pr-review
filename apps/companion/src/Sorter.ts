@@ -1,5 +1,5 @@
 import { AgentSort, type AgentError, type FileStat, type GitError, type GitHubError, type PrRef, type RepoNotConfigured, type SortResult } from '@pr-review/domain'
-import { Context, Effect, Layer, type Stream } from 'effect'
+import { Context, Deferred, Effect, Exit, Fiber, Layer, type Stream } from 'effect'
 import { PersistedCache } from 'effect/persistence'
 import { readFileSync } from 'node:fs'
 import { Agent } from './Agent.ts'
@@ -18,6 +18,9 @@ export type SortError = AgentError | GitError | GitHubError | RepoNotConfigured
 /** A sort ready to run: the prompt, and what makes the agent's answer a `SortResult`. */
 export type SortPrompt = { prompt: string; cwd: string; files: ReadonlyArray<FileStat>; finish(answer: AgentSort): SortResult }
 
+/** See `Sorter.claim`. */
+export type SortClaim = { running: Effect.Effect<SortResult, SortError> } | { done(exit: Exit.Exit<SortResult, SortError>): Effect.Effect<void> }
+
 export class Sorter extends Context.Service<
   Sorter,
   {
@@ -28,6 +31,11 @@ export class Sorter extends Context.Service<
     steps(ref: PrRef, headSha: string): Stream.Stream<string>
     /** Everything a sort needs short of the agent turn, for runs that make the turn themselves. */
     prepare(ref: PrRef, headSha: string, report?: (step: string) => Effect.Effect<void>): Effect.Effect<SortPrompt, SortError>
+    /**
+     * One sort per head at a time: either the sort already running for this head, or the caller's claim to make it.
+     * While claimed, `sort` waits for the claimant; `remember` or `done` settles it.
+     */
+    claim(ref: PrRef, headSha: string): Effect.Effect<SortClaim>
     /** Saves a sort made elsewhere, so `sort` and `cached` answer with it. */
     remember(ref: PrRef, headSha: string, result: SortResult): Effect.Effect<void>
   }
@@ -85,13 +93,37 @@ export class Sorter extends Context.Service<
       const cache = yield* PersistedCache.make(run, { storeId: 'sort', ...cacheOptions })
       const read = yield* peek('sort')
       const write = yield* poke('sort')
+      const scope = yield* Effect.scope
+      const inflight = new Map<string, Deferred.Deferred<SortResult, SortError>>()
+      const settle = (key: string, exit: Exit.Exit<SortResult, SortError>) =>
+        Effect.suspend(() => {
+          const d = inflight.get(key)
+          inflight.delete(key)
+          return d ? Effect.asVoid(Deferred.done(d, exit)) : Effect.void
+        })
+      const claim = (ref: PrRef, headSha: string) =>
+        Effect.sync((): SortClaim => {
+          const key = keyOf({ ...ref, headSha })
+          const running = inflight.get(key)
+          if (running) return { running: Deferred.await(running) }
+          const d = Deferred.makeUnsafe<SortResult, SortError>()
+          inflight.set(key, d)
+          return { done: (exit) => (inflight.get(key) === d ? settle(key, exit) : Effect.void) }
+        })
       return Sorter.of({
         prepare,
+        claim,
         remember: (ref, headSha, result) => {
           const key = new SortKey({ ...ref, headSha })
-          return Effect.andThen(Effect.orDie(cache.invalidate(key)), write(key, result))
+          return Effect.andThen(Effect.orDie(cache.invalidate(key)), write(key, result)).pipe(Effect.andThen(settle(keyOf(key), Exit.succeed(result))))
         },
-        sort: (ref, headSha) => storeFailuresDie(cache.get(new SortKey({ ...ref, headSha }))),
+        sort: (ref, headSha) =>
+          Effect.flatMap(claim(ref, headSha), (c) =>
+            'running' in c
+              ? c.running
+              : // In the layer's scope, so a closed page never interrupts a sort someone else is waiting on.
+                Effect.flatMap(Effect.forkIn(storeFailuresDie(cache.get(new SortKey({ ...ref, headSha }))).pipe(Effect.onExit(c.done)), scope), Fiber.join),
+          ),
         cached: (ref, headSha) => read(new SortKey({ ...ref, headSha })),
         steps: (ref, headSha) => steps.follow(keyOf({ ...ref, headSha })),
       })

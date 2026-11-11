@@ -31,7 +31,7 @@ const sortOf = (id: string, summary: string): SortResult => ({
 const sorts: Record<number, SortResult> = { 6: sortOf('model', 'Adds the model.'), 7: sortOf('api', 'Adds the API.') }
 
 /** Any sort or PR opinion would be a paid run per PR and fails the test. */
-const fakeSorter = Layer.succeed(Sorter, Sorter.of({ sort: (r) => Effect.die(`sorted #${r.number}`), cached: (r) => Effect.succeed(sorts[r.number]), steps: () => Stream.never, prepare: () => Effect.die('prepared'), remember: () => Effect.void }))
+const fakeSorter = Layer.succeed(Sorter, Sorter.of({ sort: (r) => Effect.die(`sorted #${r.number}`), cached: (r) => Effect.succeed(sorts[r.number]), steps: () => Stream.never, prepare: () => Effect.die('prepared'), claim: () => Effect.die('claimed'), remember: () => Effect.void }))
 
 const prOpinion = (title: string): PrOpinion => ({
   headSha: 'sha6',

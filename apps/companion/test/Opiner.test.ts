@@ -47,6 +47,7 @@ const fakeSorter = Layer.succeed(
     cached: (r) => Effect.succeed(r.number === 7 ? undefined : sorts[r.number]),
     steps: () => Stream.never,
     prepare: () => Effect.die('prepared'),
+    claim: () => Effect.die('claimed'),
     remember: () => Effect.void,
   }),
 )

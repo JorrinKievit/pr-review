@@ -1,6 +1,6 @@
 import { assert, describe, it } from '@effect/vitest'
 import { type AgentAccount, AgentError, type AgentQuick, type FileStat, type AgentOpinion, type AgentSort, type Decision, type Phase } from '@pr-review/domain'
-import { Deferred, Effect, Layer, Option, Stream } from 'effect'
+import { Deferred, Effect, Fiber, Layer, Option, Stream } from 'effect'
 import { KeyValueStore } from 'effect/persistence'
 import { Opiner } from '../src/Opiner.ts'
 import { Reviewer } from '../src/Reviewer.ts'
@@ -247,6 +247,39 @@ describe('Reviewer', () => {
       }).pipe(Effect.provide(layer))
       assert.strictEqual(agent.calls.filter((c) => c.log.kind === 'sort').length, 1)
       assert.strictEqual(new Set(agent.calls.map((c) => c.session)).size, 1)
+    }))
+
+  it.effect('a review joins the sort the stack page already started for the head', () =>
+    Effect.gen(function* () {
+      const started = yield* Deferred.make<void>()
+      const gate = yield* Deferred.make<void>()
+      let sorts = 0
+      // Each sort names its decisions apart, so two sorts would leave the opinion on ids the cached sort lacks.
+      const { agent, layer } = setup({
+        sort: () => {
+          const n = ++sorts
+          return Effect.andThen(Deferred.succeed(started, undefined), Effect.as(Deferred.await(gate), sortOf(many.map((d) => ({ ...d, id: `${d.id}x${n}` })))))
+        },
+      })
+      const { r, cached } = yield* Effect.gen(function* () {
+        const stack = yield* Effect.forkChild((yield* Sorter).sort(ref, 'HEAD1'))
+        yield* Deferred.await(started)
+        const reviewer = yield* Reviewer
+        yield* reviewer.prepare(ref, 'HEAD1')
+        const label = yield* reviewer.progress(ref, 'HEAD1').pipe(
+          Stream.map((ps) => ps.find((p) => p.id === 'sort')?.label),
+          Stream.filter((l) => l !== undefined),
+          Stream.runHead,
+        )
+        assert.strictEqual(Option.getOrThrow(label), 'Sorting #7: joining the sort already running')
+        yield* Deferred.succeed(gate, undefined)
+        yield* Fiber.join(stack)
+        return { r: yield* reviewer.result(ref, 'HEAD1'), cached: yield* (yield* Sorter).cached(ref, 'HEAD1') }
+      }).pipe(Effect.provide(layer))
+      assert.strictEqual(agent.calls.filter((c) => c.log.kind === 'sort').length, 1)
+      const ids = r.sort.decisions.map((d) => d.id)
+      assert.deepStrictEqual(cached?.decisions.map((d) => d.id), ids)
+      assert.deepStrictEqual(r.opinion?.decisions.map((d) => d.decisionId), ids)
     }))
 
   it.effect('opinion failure still returns the sort with opinionError', () =>

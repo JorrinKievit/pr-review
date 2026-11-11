@@ -13,6 +13,7 @@ import { CompanionRpcs, HandlersLive, LoggedLive } from '../src/handlers.ts'
 import { Opiner } from '../src/Opiner.ts'
 import { contentIds } from '../src/opinionContext.ts'
 import { Overview } from '../src/Overview.ts'
+import { Reviewer } from '../src/Reviewer.ts'
 import { Sorter } from '../src/Sorter.ts'
 import { StackOpiner } from '../src/StackOpiner.ts'
 import { Store } from '../src/Store.ts'
@@ -65,7 +66,7 @@ const setup = (
   )
   const deps = Layer.mergeAll(agent.layer, (o.git ?? fakeGit({ files: o.files ?? files, diff: o.diff ?? 'd' })).layer, fakeGitHub({ listOpenPrs: () => Effect.succeed([entry(7, 'master', 'feat')]), ...o.github }), configLayer())
   const store = Store.layerWith(KeyValueStore.layerMemory)
-  const services = Layer.mergeAll(StackOpiner.layer, Asker.layer, Overview.layer).pipe(Layer.provideMerge(Opiner.layer), Layer.provideMerge(Layer.mergeAll(Sorter.layer, Tickets.layer)), Layer.provideMerge(store), Layer.provideMerge(deps))
+  const services = Layer.mergeAll(StackOpiner.layer, Asker.layer, Overview.layer, Reviewer.layer).pipe(Layer.provideMerge(Opiner.layer), Layer.provideMerge(Layer.mergeAll(Sorter.layer, Tickets.layer)), Layer.provideMerge(store), Layer.provideMerge(deps))
   const layer = HandlersLive.pipe(Layer.provide(services))
   // Built in the test's scope, like the companion's process scope: the handlers outlive each client call.
   const client = Effect.flatMap(Layer.build(Layer.merge(layer, LoggedLive)), (ctx) => RpcTest.makeClient(CompanionRpcs).pipe(Effect.provideContext(ctx)))
@@ -397,6 +398,43 @@ describe('handlers', () => {
       assert.deepStrictEqual(other._tag === 'Done' && other.state, {})
     }).pipe(Effect.scoped))
 
+  it.live('Review streams Preparing then Done', () =>
+    Effect.gen(function* () {
+      const { agent, client } = setup({ delay: 100, sorts: [{ decisions: [d1], skim: [], claims: [] }] })
+      const c = yield* client
+      const events = yield* Stream.runCollect(c.Review({ ref, headSha: 'HEAD1' }))
+      const t = tags(events)
+      assert.deepStrictEqual([...new Set(t)], ['Preparing', 'Done'])
+      const preparing = events.flatMap((e) => (e._tag === 'Preparing' ? [e.phases] : []))
+      assert.isTrue(preparing.some((ps) => ps.some((p) => p.id === 'sort' && p.label === 'Sorting 1 file' && p.state === 'running')))
+      assert.isTrue(preparing.some((ps) => ps.some((p) => p.id === 'opinion' && p.label === 'Judging 1 decision')))
+      // Deduplicated: no two snapshots in a row are the same.
+      assert.isTrue(preparing.every((ps, i) => i === 0 || JSON.stringify(ps) !== JSON.stringify(preparing[i - 1])))
+      const done = events.at(-1)!
+      assert.strictEqual(done._tag, 'Done')
+      if (done._tag !== 'Done') return
+      assert.deepStrictEqual(done.sort.decisions.map((d) => d.id), ['d1'])
+      assert.deepStrictEqual(done.opinion?.decisions.map((d) => d.decisionId), ['d1'])
+      assert.deepStrictEqual(done.findingStates, {})
+      assert.deepStrictEqual(done.state, {})
+      assert.deepStrictEqual(agent.calls.map((x) => x.log.kind), ['sort', 'opinion'])
+      // A fully prepared head answers at once.
+      assert.deepStrictEqual(tags(yield* Stream.runCollect(c.Review({ ref, headSha: 'HEAD1' }))), ['Done'])
+    }).pipe(Effect.scoped))
+
+  it.live('Prepare ignores PRs the viewer is not asked to review', () =>
+    Effect.gen(function* () {
+      const other = setup({ delay: 100, github: { requestedReviewers: () => Effect.succeed(['ann']) } })
+      yield* (yield* other.client).Prepare({ ref })
+      yield* Effect.sleep('30 millis')
+      assert.strictEqual(other.agent.calls.length, 0)
+
+      const asked = setup({ delay: 100, github: { requestedReviewers: () => Effect.succeed(['ann', 'Me']) } })
+      yield* (yield* asked.client).Prepare({ ref })
+      yield* Effect.sleep('30 millis')
+      assert.deepStrictEqual(asked.agent.calls.map((x) => x.log.kind), ['sort'])
+    }).pipe(Effect.scoped))
+
   it.effect('Opinion with run false and nothing cached is Idle', () =>
     Effect.gen(function* () {
       const { agent, client } = setup()
@@ -514,7 +552,7 @@ describe('handlers', () => {
   const ruleClient = (reply: { path: string; rule: string }, fg = fakeGit({ rules: ['AGENTS.md'], show: { 'origin/master:AGENTS.md': '# Rules\n\n- one\n' } })) => {
     const agent = fakeAgent(() => Effect.succeed(reply))
     const deps = Layer.mergeAll(agent.layer, fg.layer, fakeGitHub(), configLayer())
-    const services = Layer.mergeAll(StackOpiner.layer, Asker.layer, Overview.layer).pipe(Layer.provideMerge(Opiner.layer), Layer.provideMerge(Layer.mergeAll(Sorter.layer, Tickets.layer)), Layer.provideMerge(Store.layerWith(KeyValueStore.layerMemory)), Layer.provideMerge(deps))
+    const services = Layer.mergeAll(StackOpiner.layer, Asker.layer, Overview.layer, Reviewer.layer).pipe(Layer.provideMerge(Opiner.layer), Layer.provideMerge(Layer.mergeAll(Sorter.layer, Tickets.layer)), Layer.provideMerge(Store.layerWith(KeyValueStore.layerMemory)), Layer.provideMerge(deps))
     const client = Effect.flatMap(Layer.build(Layer.merge(HandlersLive.pipe(Layer.provide(services)), LoggedLive)), (ctx) => RpcTest.makeClient(CompanionRpcs).pipe(Effect.provideContext(ctx)))
     return { agent, client }
   }

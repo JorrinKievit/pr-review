@@ -86,6 +86,12 @@ export const peek = Effect.fnUntraced(function* (storeId: string) {
     )
 })
 
+/** Writes a success where a `PersistedCache` with this store id reads it. Invalidate the cache's key first: it keeps hits in memory too. */
+export const poke = Effect.fnUntraced(function* (storeId: string) {
+  const store = yield* (yield* Persistence.Persistence).make({ storeId, timeToLive: cacheOptions.timeToLive })
+  return <A extends Schema.Constraint, E extends Schema.Constraint>(key: Persistable.Persistable<A, E>, value: A['Type']) => Effect.orDie(store.set(key, Exit.succeed(value)))
+})
+
 /** A broken store must not hide the result: storage failures become defects. */
 type StoreFailure = Persistence.PersistenceError | Schema.SchemaError
 const isStoreFailure = (e: unknown): e is StoreFailure => e instanceof Persistence.PersistenceError || Schema.isSchemaError(e)

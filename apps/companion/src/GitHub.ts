@@ -19,6 +19,8 @@ export interface GitHubClient {
   fileAt(owner: string, repo: string, path: string, ref?: string): Effect.Effect<string | undefined, GitHubError>
   /** An issue's title and body; null when it is a pull request or does not exist. */
   getIssue(owner: string, repo: string, n: number): Effect.Effect<{ title: string; body: string } | null, GitHubError>
+  /** Logins asked to review the PR (users only; a requested team does not list its members). */
+  requestedReviewers(owner: string, repo: string, n: number): Effect.Effect<ReadonlyArray<string>, GitHubError>
   /** The login the token belongs to. */
   viewer(): Effect.Effect<string, GitHubError>
   submitReview(
@@ -140,6 +142,11 @@ export const makeClient = Effect.fnUntraced(function* (octokit: Octokit) {
       }),
     ),
   )
+  const requestedReviewers = yield* cachedRead(([owner, repo, n]) =>
+    call(() => octokit.rest.pulls.listRequestedReviewers({ owner: String(owner), repo: String(repo), pull_number: Number(n) })).pipe(
+      Effect.map(({ data }) => data.users.map((u) => u.login)),
+    ),
+  )
 
   const viewer = yield* Cache.makeWith(() => call(() => octokit.rest.users.getAuthenticated()).pipe(Effect.map(({ data }) => data.login)), {
     capacity: 1,
@@ -151,6 +158,7 @@ export const makeClient = Effect.fnUntraced(function* (octokit: Octokit) {
     listOpenPrs: (owner, repo) => listOpenPrs(owner, repo),
     listThreads: (owner, repo, n) => listThreads(owner, repo, n),
     getChecks: (owner, repo, sha) => getChecks(owner, repo, sha),
+    requestedReviewers: (owner, repo, n) => requestedReviewers(owner, repo, n),
     viewer: () => Cache.get(viewer, 'me'),
     fileAt: (owner, repo, path, ref) =>
       call(() => octokit.request('GET /repos/{owner}/{repo}/contents/{path}', { owner, repo, path, ...(ref ? { ref } : {}), mediaType: { format: 'raw' } })).pipe(

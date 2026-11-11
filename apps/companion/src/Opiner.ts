@@ -1,4 +1,4 @@
-import { AgentError, AgentOpinion, type DecisionOpinion, type Evidence, type FileStat, type PrOpinion, type PrRef, repoSettings, type SortResult, type StackEntry } from '@pr-review/domain'
+import { AgentError, AgentOpinion, type Decision, type DecisionOpinion, type Evidence, type FileStat, type GitError, type PrOpinion, type PrRef, repoSettings, type StackEntry } from '@pr-review/domain'
 import { Context, Effect, Layer, type Stream } from 'effect'
 import { PersistedCache } from 'effect/persistence'
 import { readFileSync } from 'node:fs'
@@ -13,7 +13,7 @@ import { citationReader, contentIds, describePr, guidanceSection, relatedSection
 import { buildStack } from './stack.ts'
 import { Tickets } from './Tickets.ts'
 import { makeSteps } from './steps.ts'
-import { cacheOptions, DeeperKey, OpinionKey, peek, storeFailuresDie } from './Store.ts'
+import { cacheOptions, DeeperKey, OpinionKey, peek, poke, storeFailuresDie } from './Store.ts'
 
 const bundledSkill = readFileSync(new URL('../prompts/review-skill/SKILL.md', import.meta.url), 'utf8')
 
@@ -27,9 +27,9 @@ const sameHeads = (a: Heads, b: Heads) => Object.keys(a).length === Object.keys(
  */
 const normalize = (
   answer: AgentOpinion,
-  o: { number: number; sort: SortResult; deep: boolean; hunks: Hunks; above: ReadonlyArray<number>; read: (e: Evidence) => Effect.Effect<string | undefined> },
+  o: { number: number; decisions: ReadonlyArray<Decision>; deep: boolean; hunks: Hunks; above: ReadonlyArray<number>; read: (e: Evidence) => Effect.Effect<string | undefined> },
 ) => {
-  const decisions = new Map(o.sort.decisions.map((d) => [d.id, d]))
+  const decisions = new Map(o.decisions.map((d) => [d.id, d]))
   const seen = new Set<string>()
   return Effect.forEach(
     answer.decisions.filter((a) => decisions.has(a.decisionId) && !seen.has(a.decisionId) && seen.add(a.decisionId)),
@@ -70,6 +70,15 @@ export const anchorHunks = (git: Git['Service'], repoKey: string, mergeBase: str
   return asked.length ? Effect.map(git.diff(repoKey, mergeBase, head, asked), hunkLines) : Effect.succeed<Hunks>(new Map())
 }
 
+/** What opinion turns on one head share; see `Opiner.context`. */
+export type OpinionContext = {
+  cwd: string
+  related: ReadonlyArray<string>
+  prompt(decisions: ReadonlyArray<Decision>, o?: { deep?: boolean; continued?: boolean }): Effect.Effect<string>
+  /** Normalizes an answer on `decisions` (see `normalize`) into the PR's opinion. */
+  finish(answer: AgentOpinion, decisions: ReadonlyArray<Decision>, deep?: boolean): Effect.Effect<PrOpinion, GitError>
+}
+
 export class Opiner extends Context.Service<
   Opiner,
   {
@@ -81,6 +90,10 @@ export class Opiner extends Context.Service<
     steps(ref: PrRef, headSha: string, decisionId?: string): Stream.Stream<string>
     /** One decision re-run on the strongest model; replaces that decision in `cached`/`opine` results. Cached per head. */
     deeper(ref: PrRef, headSha: string, decisionId: string): Effect.Effect<DecisionOpinion, SortError>
+    /** The prompt and normalizing for runs that make the opinion turns themselves. */
+    context(ref: PrRef, headSha: string): Effect.Effect<OpinionContext, SortError>
+    /** Saves an opinion made elsewhere, so `cached` and `opine` answer with it. */
+    remember(ref: PrRef, headSha: string, opinion: PrOpinion): Effect.Effect<void>
   }
 >()('pr-review/Opiner') {
   static readonly layer = Layer.effect(
@@ -106,22 +119,20 @@ export class Opiner extends Context.Service<
         return { stack, above: stack.slice(i + 1).filter((e) => heads.has(e.baseRef) && heads.add(e.headRef)) }
       })
 
-      const analyse = Effect.fn('Opiner.run')(function* ({ host, owner, repo, number, headSha }: { host: string; owner: string; repo: string; number: number; headSha: string }, only?: string) {
-        const ref = { host, owner, repo, number }
+      /** What opinion turns on this head share: the PR, its stack, ticket and skill, fetched once. */
+      const context = Effect.fn('Opiner.context')(function* (ref: PrRef, headSha: string, report: (step: string) => Effect.Effect<void> = () => Effect.void) {
+        const { host, owner, repo, number } = ref
         const repoKey = `${host}/${owner}/${repo}`
-        const report = steps.report(only ? `${keyOf({ ...ref, headSha })}/${only}` : keyOf({ ...ref, headSha }))
         yield* report('Fetching the PR')
         const settings = yield* config.settings
         const { review } = settings
         const gh = yield* github.forHost(host)
         const pr = yield* gh.getPr(owner, repo, number)
         const { headSha: head, mergeBase } = yield* git.fetchPr(repoKey, number, pr.baseRef, headSha)
-        const [fullSort, files, { stack, above }, defaultBranch, ticket] = yield* Effect.all(
-          [sorter.sort(ref, headSha), git.numstat(repoKey, mergeBase, head), stackOf(ref), git.defaultBranch(repoKey), tickets.summary(ref, pr)],
-          { concurrency: 5 },
+        const [files, { stack, above }, defaultBranch, ticket] = yield* Effect.all(
+          [git.numstat(repoKey, mergeBase, head), stackOf(ref), git.defaultBranch(repoKey), tickets.summary(ref, pr)],
+          { concurrency: 4 },
         )
-        const sort = only ? { ...fullSort, decisions: fullSort.decisions.filter((d) => d.id === only) } : fullSort
-        if (only && sort.decisions.length === 0) return yield* new AgentError({ message: `This PR has no decision ${only} to dig into` })
         const master = `origin/${defaultBranch}`
         const { related, reviewSkill: skillPath } = repoSettings(settings, repoKey)
         const skill = skillPath
@@ -144,47 +155,67 @@ export class Opiner extends Context.Service<
                 )
             return describePr(e, sorted, changed)
           })
-        const inDecisions = new Set(sort.decisions.flatMap((d) => d.files.map((f) => f.path)))
-        const paths = files.filter((f) => inDecisions.has(f.path)).flatMap((f) => (f.previous ? [f.previous, f.path] : [f.path]))
-        const [diff, guidance, stackText] = yield* Effect.all(
-          [
-            paths.length ? git.diff(repoKey, mergeBase, head, paths) : Effect.succeed(''),
-            review.guidance.length ? git.lsTree(repoKey, master, review.guidance) : Effect.succeed([]),
-            Effect.forEach(stack, describe, { concurrency: 4 }),
-          ],
-          { concurrency: 3 },
+        const [guidance, stackText] = yield* Effect.all(
+          [review.guidance.length ? git.lsTree(repoKey, master, review.guidance) : Effect.succeed([]), Effect.forEach(stack, describe, { concurrency: 4 })],
+          { concurrency: 2 },
         )
 
-        const prompt = [
-          skill,
-          `# Refs\nPR head: ${head}\nMerge base: ${mergeBase}\nDefault branch: ${master}`,
-          guidanceSection(master, guidance),
-          relatedSection(related),
-          ticketSection(ticket, 'judge the Spec axis from the PR description alone and say so'),
-          `# Stack (bottom first; compare a PR with the one below it using git diff <head below> <its head>)\n${stackText.join('\n\n') || '(not stacked)'}`,
-          `# PR #${number}: ${pr.title} (by ${pr.author})\n\n${pr.body || '(no description)'}`,
-          `# Decisions\n${JSON.stringify(sort.decisions)}`,
-          diff.length > review.maxDiffKb * 1000
-            ? `# Diff\nDiff too large; read files with git show ${head}:<path> and compare with git diff ${mergeBase} ${head} -- <path>`
-            : `# Diff\n${diff || '(no decision files)'}`,
-          ...(only ? ['# Depth\nTake your time on this one decision; read every file it touches in full.'] : []),
-        ].join('\n\n')
-
-        const answer = yield* agent.structured({
-          prompt,
-          schema: AgentOpinion,
+        return {
           cwd: git.dir(repoKey),
           related: related.map((r) => r.repo),
+          /** `continued`: the turn follows the sort in its session, which already has the diff. */
+          prompt: (decisions, o = {}) =>
+            Effect.gen(function* () {
+              const inDecisions = new Set(decisions.flatMap((d) => d.files.map((f) => f.path)))
+              const paths = files.filter((f) => inDecisions.has(f.path)).flatMap((f) => (f.previous ? [f.previous, f.path] : [f.path]))
+              // A diff git can't make is left for the agent to read itself.
+              const diff = o.continued || !paths.length ? '' : yield* git.diff(repoKey, mergeBase, head, paths).pipe(Effect.orElseSucceed(() => undefined))
+              return [
+                skill,
+                `# Refs\nPR head: ${head}\nMerge base: ${mergeBase}\nDefault branch: ${master}`,
+                guidanceSection(master, guidance),
+                relatedSection(related),
+                ticketSection(ticket, 'judge the Spec axis from the PR description alone and say so'),
+                `# Stack (bottom first; compare a PR with the one below it using git diff <head below> <its head>)\n${stackText.join('\n\n') || '(not stacked)'}`,
+                `# PR #${number}: ${pr.title} (by ${pr.author})\n\n${pr.body || '(no description)'}`,
+                `# Decisions\n${JSON.stringify(decisions)}`,
+                o.continued
+                  ? `# Diff\nIn the sort above; read files again with git show ${head}:<path> where you need more.`
+                  : diff === undefined || diff.length > review.maxDiffKb * 1000
+                    ? `# Diff\nDiff too large; read files with git show ${head}:<path> and compare with git diff ${mergeBase} ${head} -- <path>`
+                    : `# Diff\n${diff || '(no decision files)'}`,
+                ...(o.deep ? ['# Depth\nTake your time on this one decision; read every file it touches in full.'] : []),
+              ].join('\n\n')
+            }),
+          finish: (answer, decisions, deep = false) =>
+            Effect.gen(function* () {
+              const read = citationReader(git, github, repoKey, related, (e) => (e.ref === 'base' ? mergeBase : head))
+              const anchorPaths = [...answer.decisions.flatMap((a) => a.findings.flatMap((f) => (f.anchor ? [f.anchor.path] : []))), ...decisions.flatMap((d) => d.files.slice(0, 1).map((f) => f.path))]
+              const hunks = yield* anchorHunks(git, repoKey, mergeBase, head, files, anchorPaths)
+              const normalized = yield* normalize(answer, { number, decisions, deep, hunks, above: above.map((e) => e.number), read })
+              return { headSha: head, ticket: ticket.text, ticketNote: ticket.note, decisions: normalized, stackHeads: headsOf(above) } satisfies PrOpinion
+            }),
+        } satisfies OpinionContext
+      })
+
+      const analyse = Effect.fn('Opiner.run')(function* (key: { host: string; owner: string; repo: string; number: number; headSha: string }, only?: string) {
+        const { host, owner, repo, number, headSha } = key
+        const ref = { host, owner, repo, number }
+        const report = steps.report(only ? `${keyOf(key)}/${only}` : keyOf(key))
+        const [sort, c] = yield* Effect.all([sorter.sort(ref, headSha), context(ref, headSha, report)], { concurrency: 2 })
+        const decisions = only ? sort.decisions.filter((d) => d.id === only) : sort.decisions
+        if (only && decisions.length === 0) return yield* new AgentError({ message: `This PR has no decision ${only} to dig into` })
+        const answer = yield* agent.structured({
+          prompt: yield* c.prompt(decisions, { deep: only !== undefined }),
+          schema: AgentOpinion,
+          cwd: c.cwd,
+          related: c.related,
           ...(only ? { prefer: 'deep' as const } : {}),
-          log: { kind: only ? 'deeper' : 'opinion', owner, repo, number, headSha: head },
+          log: { kind: only ? 'deeper' : 'opinion', owner, repo, number, headSha },
           onStep: report,
         })
         yield* report('Checking the citations')
-        const read = citationReader(git, github, repoKey, related, (e) => (e.ref === 'base' ? mergeBase : head))
-        const anchorPaths = [...answer.decisions.flatMap((a) => a.findings.flatMap((f) => (f.anchor ? [f.anchor.path] : []))), ...sort.decisions.flatMap((d) => d.files.slice(0, 1).map((f) => f.path))]
-        const hunks = yield* anchorHunks(git, repoKey, mergeBase, head, files, anchorPaths)
-        const decisions = yield* normalize(answer, { number, sort, deep: only !== undefined, hunks, above: above.map((e) => e.number), read })
-        return { headSha: head, ticket: ticket.text, ticketNote: ticket.note, decisions, stackHeads: headsOf(above) } satisfies PrOpinion
+        return yield* c.finish(answer, decisions, only !== undefined)
       })
 
       const run = (key: OpinionKey) => analyse(key)
@@ -197,12 +228,18 @@ export class Opiner extends Context.Service<
       const deeperCache = yield* PersistedCache.make(runDeeper, { storeId: 'deeper', ...cacheOptions })
       const read = yield* peek('opinion')
       const readDeeper = yield* peek('deeper')
+      const write = yield* poke('opinion')
       const withDeeper = (ref: PrRef, headSha: string, o: PrOpinion) =>
         Effect.map(
           Effect.forEach(o.decisions, (d) => Effect.map(readDeeper(new DeeperKey({ ...ref, headSha, decisionId: d.decisionId })), (hit) => hit ?? d)),
           (decisions): PrOpinion => ({ ...o, decisions }),
         )
       return Opiner.of({
+        context: (ref, headSha) => context(ref, headSha),
+        remember: (ref, headSha, opinion) => {
+          const key = new OpinionKey({ ...ref, headSha })
+          return Effect.andThen(Effect.orDie(cache.invalidate(key)), write(key, opinion))
+        },
         cached: (ref, headSha) =>
           Effect.flatMap(read(new OpinionKey({ ...ref, headSha })), (hit) => (hit ? withDeeper(ref, headSha, hit) : Effect.undefined)),
         opine: (ref, headSha) =>

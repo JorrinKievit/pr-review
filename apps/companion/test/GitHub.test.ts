@@ -118,6 +118,16 @@ describe('GitHub', () => {
       assert.strictEqual(yield* gh.viewer(), 'jorrin')
     }))
 
+  it.effect('requestedReviewers lists the requested users, cached', () =>
+    Effect.gen(function* () {
+      const { reqs, octokit } = fakeOctokit(() => ({ status: 200, body: { users: [{ login: 'jorrin' }, { login: 'ann' }], teams: [{ slug: 'core' }] } }))
+      const gh = yield* makeClient(octokit)
+      assert.deepStrictEqual(yield* gh.requestedReviewers('o', 'r', 7), ['jorrin', 'ann'])
+      yield* gh.requestedReviewers('o', 'r', 7)
+      assert.strictEqual(reqs.length, 1)
+      assert.match(reqs[0]!.url, /pulls\/7\/requested_reviewers/)
+    }))
+
   it.effect('other failures become GitHubError with the status', () =>
     Effect.gen(function* () {
       const gh = yield* makeClient(fakeOctokit(() => ({ status: 404, body: { message: 'Not Found' } })).octokit)

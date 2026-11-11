@@ -1,4 +1,4 @@
-import { AgentError, AgentRule, appendPatch, inGuidance, ruleBranch, ruleTitle, type DecisionState, type DeeperEvent, type DecisionOpinion, type DecisionStates, type Draft, type FindingStates, type OpinionEvent, type PrOpinion, type PrRef, type Rereview, ReviewRpcs, type SortResult, type SortEvent, type StackEntry, type StackEntryStatus, type StackEvent, type StackOpinion, type StackOpinionEvent, targetKey } from '@pr-review/domain'
+import { AgentError, AgentRule, appendPatch, inGuidance, ruleBranch, ruleTitle, type DecisionState, type DeeperEvent, type DecisionOpinion, type DecisionStates, type Draft, type FindingStates, type OpinionEvent, type PrOpinion, type PrRef, type Rereview, type ReviewEvent, ReviewRpcs, type SortResult, type SortEvent, type StackEntry, type StackEntryStatus, type StackEvent, type StackOpinion, type StackOpinionEvent, targetKey } from '@pr-review/domain'
 import { readFileSync } from 'node:fs'
 import { Cause, Clock, Effect, Exit, Fiber, Layer, Option, Queue, type Scope, Stream } from 'effect'
 import { RpcMiddleware } from 'effect/rpc'
@@ -12,6 +12,7 @@ import { sameChange } from './interdiff.ts'
 import { Opiner } from './Opiner.ts'
 import { guidanceSection } from './opinionContext.ts'
 import { Overview } from './Overview.ts'
+import { Reviewer } from './Reviewer.ts'
 import { Sorter } from './Sorter.ts'
 import { buildStack } from './stack.ts'
 import { StackOpiner } from './StackOpiner.ts'
@@ -29,6 +30,13 @@ const headKey = (ref: PrRef, headSha: string) => `${prKey(ref)}@${headSha}`
 /** A sort answered from cache this fast skips the Running event, so a cached page shows no spinner flash. */
 const CACHE_HIT_WINDOW = '50 millis'
 
+/** Forks `run` in `scope`; `cached` when it finished within CACHE_HIT_WINDOW. */
+const startIn = Effect.fnUntraced(function* <A, E>(scope: Scope.Scope, run: Effect.Effect<A, E>) {
+  const fiber = yield* Effect.forkIn(run, scope)
+  const cached = yield* Effect.raceFirst(Effect.as(Fiber.await(fiber), true), Effect.as(Effect.sleep(CACHE_HIT_WINDOW), false))
+  return { fiber, cached }
+})
+
 /**
  * Streams a run forked in `scope`: Running with its steps, then the event `done` makes of its result.
  * A run that finishes within CACHE_HIT_WINDOW was cached and emits only that.
@@ -36,8 +44,7 @@ const CACHE_HIT_WINDOW = '50 millis'
 const progress = <A, E, Ev>(scope: Scope.Scope, run: Effect.Effect<A, E>, steps: Stream.Stream<string>, done: (a: A) => Effect.Effect<Ev>) =>
   Stream.unwrap(
     Effect.gen(function* () {
-      const fiber = yield* Effect.forkIn(run, scope)
-      const cached = yield* Effect.raceFirst(Effect.as(Fiber.await(fiber), true), Effect.as(Effect.sleep(CACHE_HIT_WINDOW), false))
+      const { fiber, cached } = yield* startIn(scope, run)
       const end = Stream.fromEffect(Effect.flatMap(Fiber.join(fiber), done))
       if (cached) return end
       const startedAt = new Date(yield* Clock.currentTimeMillis).toISOString()
@@ -94,6 +101,7 @@ export const HandlersLive = ReviewRpcs.toLayer(
     const asker = yield* Asker
     const overview = yield* Overview
     const agent = yield* Agent
+    const reviewer = yield* Reviewer
     // Sorts and opinions run in the companion's scope, so a closed or reloaded tab doesn't throw away a paid run.
     const scope = yield* Effect.scope
 
@@ -251,9 +259,39 @@ export const HandlersLive = ReviewRpcs.toLayer(
           Effect.map(verdictsFor(ref, headSha, result), (v): SortEvent => ({ _tag: 'Done', result, ...v })),
         ),
 
-      Review: () => Stream.die('not implemented until Task 3'),
+      Review: ({ ref, headSha }) =>
+        Stream.unwrap(
+          Effect.gen(function* () {
+            yield* config.repo(repoKeyOf(ref))
+            yield* reviewer.prepare(ref, headSha)
+            const { fiber, cached } = yield* startIn(scope, reviewer.result(ref, headSha))
+            const end = Stream.fromEffect(
+              Effect.gen(function* () {
+                const r = yield* Fiber.join(fiber)
+                const opinion = r.opinion ?? (yield* carriedOpinion(ref, headSha)) ?? null
+                const verdicts = yield* verdictsFor(ref, headSha, r.sort)
+                const findingStates = yield* findingStatesFor(ref, headSha)
+                return { _tag: 'Done', sort: r.sort, ...verdicts, opinion, ...(r.opinionError ? { opinionError: r.opinionError } : {}), findingStates } satisfies ReviewEvent
+              }),
+            )
+            if (cached) return end
+            return reviewer.progress(ref, headSha).pipe(
+              Stream.changesWith((a, b) => JSON.stringify(a) === JSON.stringify(b)),
+              Stream.map((phases): ReviewEvent => ({ _tag: 'Preparing', phases })),
+              Stream.interruptWhen(Fiber.await(fiber)),
+              Stream.concat(end),
+            )
+          }),
+        ),
 
-      Prepare: () => Effect.void,
+      // Early start only for PRs the viewer is asked to review; anything that goes wrong just means no head start.
+      Prepare: ({ ref }) =>
+        Effect.gen(function* () {
+          yield* config.repo(repoKeyOf(ref))
+          const gh = yield* github.forHost(ref.host)
+          const [pr, asked, me] = yield* Effect.all([gh.getPr(ref.owner, ref.repo, ref.number), gh.requestedReviewers(ref.owner, ref.repo, ref.number), gh.viewer()], { concurrency: 3 })
+          if (asked.some((login) => login.toLowerCase() === me.toLowerCase())) yield* reviewer.prepare(ref, pr.headSha)
+        }).pipe(Effect.ignore({ log: 'Debug' })),
 
       Opinion: ({ ref, headSha, run }) => {
         const done = (opinion: PrOpinion) => Effect.map(findingStatesFor(ref, headSha), (states): OpinionEvent => ({ _tag: 'Done', opinion, states }))

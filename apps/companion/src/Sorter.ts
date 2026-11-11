@@ -1,4 +1,4 @@
-import { AgentSort, type AgentError, type GitError, type GitHubError, type PrRef, type RepoNotConfigured, type SortResult } from '@pr-review/domain'
+import { AgentSort, type AgentError, type FileStat, type GitError, type GitHubError, type PrRef, type RepoNotConfigured, type SortResult } from '@pr-review/domain'
 import { Context, Effect, Layer, type Stream } from 'effect'
 import { PersistedCache } from 'effect/persistence'
 import { readFileSync } from 'node:fs'
@@ -8,12 +8,15 @@ import { Git } from './Git.ts'
 import { GitHub } from './GitHub.ts'
 import { normalize } from './normalize.ts'
 import { makeSteps } from './steps.ts'
-import { cacheOptions, peek, SortKey, storeFailuresDie } from './Store.ts'
+import { cacheOptions, peek, poke, SortKey, storeFailuresDie } from './Store.ts'
 import { buildTrusted } from './trusted.ts'
 
 const instructions = readFileSync(new URL('../prompts/sort.md', import.meta.url), 'utf8')
 
 export type SortError = AgentError | GitError | GitHubError | RepoNotConfigured
+
+/** A sort ready to run: the prompt, and what makes the agent's answer a `SortResult`. */
+export type SortPrompt = { prompt: string; cwd: string; files: ReadonlyArray<FileStat>; finish(answer: AgentSort): SortResult }
 
 export class Sorter extends Context.Service<
   Sorter,
@@ -23,6 +26,10 @@ export class Sorter extends Context.Service<
     cached(ref: PrRef, headSha: string): Effect.Effect<SortResult | undefined>
     /** What a running sort is doing: the current step, then each new one. Never ends; interrupt it when the sort is done. */
     steps(ref: PrRef, headSha: string): Stream.Stream<string>
+    /** Everything a sort needs short of the agent turn, for runs that make the turn themselves. */
+    prepare(ref: PrRef, headSha: string, report?: (step: string) => Effect.Effect<void>): Effect.Effect<SortPrompt, SortError>
+    /** Saves a sort made elsewhere, so `sort` and `cached` answer with it. */
+    remember(ref: PrRef, headSha: string, result: SortResult): Effect.Effect<void>
   }
 >()('pr-review/Sorter') {
   static readonly layer = Layer.effect(
@@ -35,10 +42,8 @@ export class Sorter extends Context.Service<
       const steps = yield* makeSteps
       const keyOf = (k: { host: string; owner: string; repo: string; number: number; headSha: string }) => `${k.host}/${k.owner}/${k.repo}#${k.number}@${k.headSha}`
 
-      const run = Effect.fn('Sorter.run')(function* ({ host, owner, repo, number, headSha }: SortKey) {
+      const prepare = Effect.fn('Sorter.prepare')(function* ({ host, owner, repo, number }: PrRef, headSha: string, report: (step: string) => Effect.Effect<void> = () => Effect.void) {
         const repoKey = `${host}/${owner}/${repo}`
-        const key = keyOf({ host, owner, repo, number, headSha })
-        const report = steps.report(key)
         yield* report('Fetching the PR')
         const { review } = yield* config.settings
         const gh = yield* github.forHost(host)
@@ -65,20 +70,27 @@ export class Sorter extends Context.Service<
             ? `# Diff\nDiff too large; read files with git show ${head}:<path> and compare with git diff ${mergeBase} ${head} -- <path>`
             : `# Diff\n${diff}`,
         ].join('\n\n')
-        const sorted = yield* agent.structured({
-          prompt,
-          schema: AgentSort,
-          cwd: git.dir(repoKey),
-          log: { kind: 'sort', owner, repo, number, headSha: head },
-          onStep: report,
-        })
+        return { prompt, cwd: git.dir(repoKey), files, finish: (answer) => normalize(answer, files, groups, head, review.neverTrust, mergeBase) } satisfies SortPrompt
+      })
+
+      const run = Effect.fn('Sorter.run')(function* (key: SortKey) {
+        const { owner, repo, number, headSha } = key
+        const report = steps.report(keyOf(key))
+        const p = yield* prepare(key, headSha, report)
+        const sorted = yield* agent.structured({ prompt: p.prompt, schema: AgentSort, cwd: p.cwd, log: { kind: 'sort', owner, repo, number, headSha }, onStep: report })
         yield* report('Checking the answer')
-        return normalize(sorted, files, groups, head, review.neverTrust, mergeBase)
+        return p.finish(sorted)
       })
 
       const cache = yield* PersistedCache.make(run, { storeId: 'sort', ...cacheOptions })
       const read = yield* peek('sort')
+      const write = yield* poke('sort')
       return Sorter.of({
+        prepare,
+        remember: (ref, headSha, result) => {
+          const key = new SortKey({ ...ref, headSha })
+          return Effect.andThen(Effect.orDie(cache.invalidate(key)), write(key, result))
+        },
         sort: (ref, headSha) => storeFailuresDie(cache.get(new SortKey({ ...ref, headSha }))),
         cached: (ref, headSha) => read(new SortKey({ ...ref, headSha })),
         steps: (ref, headSha) => steps.follow(keyOf({ ...ref, headSha })),

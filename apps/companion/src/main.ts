@@ -15,13 +15,14 @@ import { CompanionRpcs, HandlersLive, LoggedLive, VERSION } from './handlers.ts'
 import { defaultExtensionId, install } from './install.ts'
 import { Opiner } from './Opiner.ts'
 import { Overview } from './Overview.ts'
+import { Reviewer } from './Reviewer.ts'
 import { loginPath } from './shellPath.ts'
 import { Sorter } from './Sorter.ts'
 import { StackOpiner } from './StackOpiner.ts'
 import { Store } from './Store.ts'
 import { Tickets } from './Tickets.ts'
 
-const services = Layer.mergeAll(StackOpiner.layer, Asker.layer, Overview.layer).pipe(
+const services = Layer.mergeAll(StackOpiner.layer, Asker.layer, Overview.layer, Reviewer.layer).pipe(
   Layer.provideMerge(Opiner.layer),
   Layer.provideMerge(Layer.mergeAll(Sorter.layer, Tickets.layer)),
   Layer.provideMerge(Layer.mergeAll(Git.layer, GitHub.layer, Store.layer)),

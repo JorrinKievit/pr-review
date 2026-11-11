@@ -42,11 +42,18 @@ export const relay = (native: NativeConnect, pages: OnConnectLike, settings: Eff
           yield* hold(ms)
           if (idle) yield* Fiber.interrupt(idle)
           idle = run(
-            Effect.suspend(() => Clock.currentTimeMillis).pipe(
-              Effect.flatMap((now) => Effect.sleep(Math.max(0, holdUntil - now))),
-              // A page may have connected while this timer was being replaced.
-              Effect.andThen(Effect.suspend(() => (current && pageCount === 0 ? close(current) : Effect.void))),
-            ),
+            Effect.gen(function* () {
+              while (true) {
+                yield* Effect.sleep(Math.max(0, holdUntil - (yield* Clock.currentTimeMillis)))
+                // A page may have connected while this timer was being replaced.
+                if (!current || pageCount > 0) return
+                // Runs no page waits on (the PR above, the stack opinion) keep the host open until they finish.
+                // ponytail: polls agent slots only, so a run between two agent calls can still be cut off at the check.
+                const pool = yield* call((c) => c.PoolStatus()).pipe(Effect.timeout('10 seconds'), Effect.orElseSucceed(() => []))
+                if (!pool.some((a) => a.busy > 0)) return yield* close(current)
+                yield* hold(Duration.toMillis(Duration.fromInputUnsafe(IDLE)))
+              }
+            }),
           )
         })
 

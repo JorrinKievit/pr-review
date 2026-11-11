@@ -2,7 +2,7 @@ import { RegistryContext, useAtomRefresh, useAtomSet, useAtomValue } from '@effe
 import type { DecisionState, DecisionStates, PrRef, PrView, SortEvent } from '@pr-review/domain'
 import { useHotkeys } from '@tanstack/react-hotkeys'
 import { AsyncResult } from 'effect/reactivity'
-import { useContext, useMemo, useState } from 'react'
+import { useContext, useEffect, useMemo, useState } from 'react'
 import { useAtoms } from '../atoms.ts'
 import { useRemembered } from '../remembered.ts'
 import { failureOf, isUnavailable } from '../result.ts'
@@ -52,6 +52,11 @@ function Loaded({ prRef, pr }: { prRef: PrRef; pr: PrView }) {
   const [runningOpinion, setRunningOpinion] = useState(false)
   // Not useAtomRefresh: that mounts the atom, which would run the opinion on open.
   const registry = useContext(RegistryContext)
+  // An opinion carried from an earlier push is matched against this head's sort, so look again once the sort is in.
+  const sorted = sort?._tag === 'Done'
+  useEffect(() => {
+    if (sorted) registry.refresh(opinionAtom(prRef, pr.headSha, false))
+  }, [sorted])
   const items = useMemo(() => buildItems(pr, sort, opinion), [pr, sort, opinion])
   const openFindings = done ? done.opinion.decisions.flatMap((d) => d.findings).filter((f) => isOpen(f, done.states)) : []
   const titles = Object.fromEntries(items.flatMap((i) => (i.kind === 'decision' ? [[i.decision.id, i.decision.title]] : [])))
@@ -139,8 +144,14 @@ function Loaded({ prRef, pr }: { prRef: PrRef; pr: PrView }) {
         opinion={opinion}
         running={runningOpinion}
         onRunOpinion={() => setRunningOpinion(true)}
+        onOpinionDone={() => setRunningOpinion(false)}
       />
-      {done && !runningOpinion && stackMoved(pr, done.opinion.stackHeads) && (
+      {done?.opinion.carriedFrom !== undefined && !runningOpinion && (
+        <div className="border-b border-border bg-info/10 px-3 py-1.5 text-sm">
+          Opinion carried over from an earlier push for {done.opinion.decisions.length} {done.opinion.decisions.length === 1 ? 'decision' : 'decisions'}
+        </div>
+      )}
+      {done && done.opinion.carriedFrom === undefined && !runningOpinion && stackMoved(pr, done.opinion.stackHeads) && (
         <div className="flex items-center gap-3 border-b border-border bg-info/10 px-3 py-1.5 text-sm">
           <span>The stack moved since this opinion.</span>
           <Button

@@ -1,6 +1,7 @@
 import { useAtomRefresh, useAtomValue } from '@effect/atom-react'
 import type { OpinionEvent, PrRef, PrView } from '@pr-review/domain'
 import { AsyncResult } from 'effect/reactivity'
+import { useEffect } from 'react'
 import { useAtoms } from '../atoms.ts'
 import { failureOf } from '../result.ts'
 import { ReviewPopover } from '../review/ReviewPopover.tsx'
@@ -8,10 +9,14 @@ import { githubFilesUrl } from '../Setup.tsx'
 import { Button, Kbd, Pill, Working } from '../ui/index.tsx'
 
 /** A run of Claude's opinion: its step while working, nothing once done. */
-function OpinionRun({ prRef, headSha }: { prRef: PrRef; headSha: string }) {
+function OpinionRun({ prRef, headSha, onDone }: { prRef: PrRef; headSha: string; onDone: () => void }) {
   const atom = useAtoms().opinionAtom(prRef, headSha, true)
   const result = useAtomValue(atom)
   const retry = useAtomRefresh(atom)
+  const finished = AsyncResult.isSuccess(result) && result.value._tag === 'Done'
+  useEffect(() => {
+    if (finished) onDone()
+  }, [finished])
   if (AsyncResult.isFailure(result))
     return (
       <span className="flex items-center gap-1.5 text-destructive">
@@ -37,6 +42,7 @@ export function TopBar(props: {
   opinion: OpinionEvent | undefined
   running: boolean
   onRunOpinion: () => void
+  onOpinionDone: () => void
 }) {
   const { pr } = props
   const position = pr.stack.findIndex((s) => s.number === pr.number)
@@ -59,9 +65,9 @@ export function TopBar(props: {
       )}
       <span className="ml-auto flex min-w-0 items-center">
         {props.running ? (
-          <OpinionRun prRef={props.prRef} headSha={pr.headSha} />
+          <OpinionRun prRef={props.prRef} headSha={pr.headSha} onDone={props.onOpinionDone} />
         ) : (
-          props.opinion?._tag === 'Idle' && (
+          (props.opinion?._tag === 'Idle' || (props.opinion?._tag === 'Done' && props.opinion.opinion.carriedFrom !== undefined)) && (
             <Button size="xs" variant="outline" onClick={props.onRunOpinion}>
               Claude's opinion
             </Button>

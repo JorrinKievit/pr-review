@@ -576,7 +576,7 @@ test('no opinion runs until the button is pressed', async () => {
   await heading('Decision one')
   const button = await screen.findByRole('button', { name: "Claude's opinion" }, { timeout: 3000 })
   await new Promise((r) => setTimeout(r, 100))
-  expect(opinionRuns).toEqual([false])
+  expect(opinionRuns).not.toContain(true)
   await userEvent.click(button)
   expect(opinionRuns.filter((r) => r)).toEqual([true])
   expect(await screen.findByText('Reading the rules', {}, { timeout: 3000 })).toBeInTheDocument()
@@ -663,7 +663,7 @@ test('stack moved line offers a re-run', async () => {
   const entry = (number: number, baseRef: string, headRef: string, headSha: string) => ({ number, title: `#${number}`, baseRef, headRef, headSha })
   const { opinionRuns } = renderPage({
     getPr: () => Effect.succeed({ ...pr, stack: [entry(7, 'master', 'h', 'HEAD1'), entry(8, 'h', 'h2', 'NEW')] }),
-    opinion: { cached: { ...opinion, stackHeads: { '8': 'OLD' } }, run: opinion },
+    opinion: { cached: { ...opinion, stackHeads: { '8': 'OLD' } }, run: { ...opinion, stackHeads: { '8': 'NEW' } } },
   })
   expect(await screen.findByText('The stack moved since this opinion.', {}, { timeout: 3000 })).toBeInTheDocument()
   expect(opinionRuns).not.toContain(true)
@@ -671,6 +671,26 @@ test('stack moved line offers a re-run', async () => {
   await waitFor(() => expect(opinionRuns).toContain(true))
   await waitFor(() => expect(screen.queryByText('The stack moved since this opinion.')).toBeNull())
   expect(opinionRuns.filter((r) => r)).toEqual([true])
+})
+
+test('the stack moved line comes back when the stack moved again during a run', async () => {
+  const entry = (number: number, baseRef: string, headRef: string, headSha: string) => ({ number, title: `#${number}`, baseRef, headRef, headSha })
+  const { opinionRuns } = renderPage({
+    getPr: () => Effect.succeed({ ...pr, stack: [entry(7, 'master', 'h', 'HEAD1'), entry(8, 'h', 'h2', 'NEW')] }),
+    opinion: { cached: { ...opinion, stackHeads: { '8': 'OLD' } }, run: { ...opinion, stackHeads: { '8': 'OLDER' } } },
+  })
+  await userEvent.click(await screen.findByRole('button', { name: 'Run again' }, { timeout: 3000 }))
+  await waitFor(() => expect(opinionRuns).toContain(true))
+  expect(await screen.findByRole('button', { name: 'Run again' }, { timeout: 3000 })).toBeInTheDocument()
+})
+
+test('an opinion carried from an earlier push says so and still offers a run that replaces it', async () => {
+  const { opinionRuns } = renderPage({ opinion: { cached: { ...opinion, carriedFrom: 'OLD' }, run: opinion } })
+  expect(await screen.findByText('Opinion carried over from an earlier push for 2 decisions', {}, { timeout: 3000 })).toBeInTheDocument()
+  await userEvent.click(screen.getByRole('button', { name: "Claude's opinion" }))
+  await waitFor(() => expect(opinionRuns).toContain(true))
+  await waitFor(() => expect(screen.queryByText(/Opinion carried over/)).toBeNull())
+  expect(screen.queryByRole('button', { name: "Claude's opinion" })).toBeNull()
 })
 
 test('Make it a rule on a posted finding shows the drafted patch', async () => {

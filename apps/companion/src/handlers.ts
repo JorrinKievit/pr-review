@@ -1,4 +1,4 @@
-import { AgentError, AgentRule, appendPatch, inGuidance, ruleBranch, ruleTitle, type DecisionState, type DeeperEvent, type DecisionStates, type Draft, type FindingStates, type OpinionEvent, type PrOpinion, type PrRef, type Rereview, ReviewRpcs, type SortResult, type SortEvent, type StackEntry, type StackEntryStatus, type StackEvent, type StackOpinion, type StackOpinionEvent, targetKey } from '@pr-review/domain'
+import { AgentError, AgentRule, appendPatch, inGuidance, ruleBranch, ruleTitle, type DecisionState, type DeeperEvent, type DecisionOpinion, type DecisionStates, type Draft, type FindingStates, type OpinionEvent, type PrOpinion, type PrRef, type Rereview, ReviewRpcs, type SortResult, type SortEvent, type StackEntry, type StackEntryStatus, type StackEvent, type StackOpinion, type StackOpinionEvent, targetKey } from '@pr-review/domain'
 import { readFileSync } from 'node:fs'
 import { Cause, Clock, Effect, Exit, Fiber, Layer, Option, Queue, type Scope, Stream } from 'effect'
 import { RpcMiddleware } from 'effect/rpc'
@@ -118,6 +118,19 @@ export const HandlersLive = ReviewRpcs.toLayer(
 
     const samePaths = (a: ReadonlyArray<string>, b: ReadonlyArray<string>) => a.length === b.length && a.every((p) => b.includes(p))
 
+    /** Whether `paths` change the same way at both heads, each diffed from its own merge base when known. */
+    const unchangedBetween = (ref: PrRef, before: { headSha: string; mergeBase?: string | undefined }, after: { headSha: string; mergeBase?: string | undefined }, paths: ReadonlyArray<string>) => {
+      const repo = repoKeyOf(ref)
+      return (
+        before.mergeBase && after.mergeBase
+          ? Effect.map(Effect.all([git.diff(repo, before.mergeBase, before.headSha, paths), git.diff(repo, after.mergeBase, after.headSha, paths)]), ([a, b]) => sameChange(a, b))
+          : Effect.map(git.diff(repo, before.headSha, after.headSha, paths), (diff) => diff === '')
+      ).pipe(
+        // The old head may be gone from the clone; then nothing is carried.
+        Effect.orElseSucceed(() => false),
+      )
+    }
+
     /**
      * The verdicts for a head. A head opened for the first time takes the verdicts of the head last worked on, for each
      * decision with the same id or the same files where none of those files changed in between. Those whose files did
@@ -135,16 +148,7 @@ export const HandlersLive = ReviewRpcs.toLayer(
         for (const { id, paths } of reviewables(result)) {
           const before = last.decisions.find((e) => e.id === id || samePaths(e.paths, paths))
           if (!before) continue
-          const all = [...new Set([...paths, ...before.paths])]
-          const repo = repoKeyOf(ref)
-          const unchanged = yield* (
-            last.mergeBase && result.mergeBase
-              ? Effect.map(Effect.all([git.diff(repo, last.mergeBase, last.headSha, all), git.diff(repo, result.mergeBase, headSha, all)]), ([a, b]) => sameChange(a, b))
-              : Effect.map(git.diff(repo, last.headSha, headSha, all), (diff) => diff === '')
-          ).pipe(
-            // The old head may be gone from the clone; then nothing is carried.
-            Effect.orElseSucceed(() => false),
-          )
+          const unchanged = yield* unchangedBetween(ref, last, { headSha, mergeBase: result.mergeBase }, [...new Set([...paths, ...before.paths])])
           if (unchanged) carried[id] = before.state
           else rereview[id] = { since: last.headSha, was: before.state }
         }
@@ -159,6 +163,39 @@ export const HandlersLive = ReviewRpcs.toLayer(
       yield* Effect.orDie(store.state.set(key, carried))
       if (fromLast) yield* keepLast(ref, headSha, result, carried)
       return { state: carried, rereview }
+    })
+
+    const keepOpinion = (ref: PrRef, headSha: string, opinion: PrOpinion) =>
+      Effect.flatMap(sorter.cached(ref, headSha), (sort) =>
+        Effect.orDie(store.lastOpinion.set(prKey(ref), { headSha, ...(sort?.mergeBase ? { mergeBase: sort.mergeBase } : {}), opinion })),
+      )
+
+    /**
+     * For a head with no opinion yet: the last opinion's decisions (matched by id or files, as verdicts are) whose change
+     * is the same at this head, with what the reviewer did with their findings. Needs this head's sort to be cached.
+     */
+    const carriedOpinion = Effect.fnUntraced(function* (ref: PrRef, headSha: string) {
+      const last = Option.getOrUndefined(yield* Effect.orDie(store.lastOpinion.get(prKey(ref))))
+      if (!last || last.headSha === headSha) return undefined
+      const [sort, before] = yield* Effect.all([sorter.cached(ref, headSha), sorter.cached(ref, last.headSha)])
+      if (!sort || !before) return undefined
+      const decisions: DecisionOpinion[] = []
+      for (const d of sort.decisions) {
+        const paths = d.files.map((f) => f.path)
+        const old = before.decisions.find((e) => e.id === d.id || samePaths(e.files.map((f) => f.path), paths))
+        const o = old && last.opinion.decisions.find((x) => x.decisionId === old.id)
+        if (!o || !(yield* unchangedBetween(ref, last, { headSha, mergeBase: sort.mergeBase }, [...new Set([...paths, ...old!.files.map((f) => f.path)])]))) continue
+        decisions.push({ ...o, decisionId: d.id, findings: o.findings.map((f) => ({ ...f, decisionId: d.id })) })
+      }
+      if (!decisions.length) return undefined
+      // Copied once, so a finding restored on this head stays restored.
+      const key = headKey(ref, headSha)
+      if (Option.isNone(yield* Effect.orDie(store.findings.get(key)))) {
+        const ids = new Set(decisions.flatMap((d) => d.findings.map((f) => f.id)))
+        const old = yield* findingStatesFor(ref, last.headSha)
+        yield* Effect.orDie(store.findings.set(key, Object.fromEntries(Object.entries(old).filter(([id]) => ids.has(id)))))
+      }
+      return { ...last.opinion, headSha, decisions, carriedFrom: last.headSha } satisfies PrOpinion
     })
 
     /** Open PRs as last seen per repo, for loads that can take them slightly stale. */
@@ -215,8 +252,13 @@ export const HandlersLive = ReviewRpcs.toLayer(
 
       Opinion: ({ ref, headSha, run }) => {
         const done = (opinion: PrOpinion) => Effect.map(findingStatesFor(ref, headSha), (states): OpinionEvent => ({ _tag: 'Done', opinion, states }))
-        if (run) return progress(scope, opiner.opine(ref, headSha), opiner.steps(ref, headSha), done)
-        return Stream.unwrap(Effect.map(opiner.cached(ref, headSha), (hit) => (hit ? Stream.fromEffect(done(hit)) : Stream.succeed<OpinionEvent>({ _tag: 'Idle' }))))
+        if (run) return progress(scope, Effect.tap(opiner.opine(ref, headSha), (o) => keepOpinion(ref, headSha, o)), opiner.steps(ref, headSha), done)
+        return Stream.unwrap(
+          Effect.map(
+            Effect.flatMap(opiner.cached(ref, headSha), (hit) => (hit ? Effect.succeed(hit) : carriedOpinion(ref, headSha))),
+            (hit) => (hit ? Stream.fromEffect(done(hit)) : Stream.succeed<OpinionEvent>({ _tag: 'Idle' })),
+          ),
+        )
       },
 
       DigDeeper: ({ ref, headSha, decisionId }) =>

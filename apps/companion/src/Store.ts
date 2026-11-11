@@ -18,6 +18,9 @@ export const LastVerdicts = Schema.Struct({
   decisions: Schema.Array(Schema.Struct({ id: Schema.String, paths: Schema.Array(Schema.String), state: DecisionState })),
 })
 
+/** The last opinion that finished on a PR, so a push can carry it for decisions whose change is the same. */
+export const LastOpinion = Schema.Struct({ headSha: Schema.String, mergeBase: Schema.optionalKey(Schema.String), opinion: PrOpinion })
+
 /** The file store names each entry after its key, so keys are hashed to stay under the 255-byte filename limit. */
 const digest = (key: string) => createHash('sha256').update(key).digest('hex')
 
@@ -99,6 +102,8 @@ export class Store extends Context.Service<
     readonly drafts: KeyValueStore.SchemaStore<typeof Drafts>
     /** Per PR (not per head): see LastVerdicts. */
     readonly lastVerdicts: KeyValueStore.SchemaStore<typeof LastVerdicts>
+    /** Per PR (not per head): see LastOpinion. */
+    readonly lastOpinion: KeyValueStore.SchemaStore<typeof LastOpinion>
     /** Per head: what changed since an earlier verdict, set when the verdicts are carried. */
     readonly rereview: KeyValueStore.SchemaStore<typeof Rereview>
     /** Per head: what the reviewer did with each finding. */
@@ -119,6 +124,7 @@ export class Store extends Context.Service<
             chats: KeyValueStore.toSchemaStore(KeyValueStore.prefix(store, 'conversations/'), Chats),
             drafts: KeyValueStore.toSchemaStore(KeyValueStore.prefix(store, 'drafts/'), Drafts),
             lastVerdicts: KeyValueStore.toSchemaStore(KeyValueStore.prefix(store, 'last-verdicts/'), LastVerdicts),
+            lastOpinion: KeyValueStore.toSchemaStore(KeyValueStore.prefix(store, 'last-opinion/'), LastOpinion),
             rereview: KeyValueStore.toSchemaStore(KeyValueStore.prefix(store, 'rereview/'), Rereview),
             remembered: KeyValueStore.toSchemaStore(KeyValueStore.prefix(store, 'remembered/'), Schema.String),
             findings: KeyValueStore.toSchemaStore(KeyValueStore.prefix(store, 'findings/'), FindingStates),

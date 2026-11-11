@@ -72,6 +72,8 @@ export const PrOpinion = Struct({
   ticketNote: String,
   decisions: Array(DecisionOpinion),
   stackHeads: Record(String, String),
+  /** Set when these decisions' opinions come from an earlier head where their change was the same. */
+  carriedFrom: optionalKey(String),
 })
 export type PrOpinion = typeof PrOpinion.Type
 

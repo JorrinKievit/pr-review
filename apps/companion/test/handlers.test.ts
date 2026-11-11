@@ -278,6 +278,46 @@ describe('handlers', () => {
       assert.deepStrictEqual(again._tag === 'Done' ? again.rereview : undefined, { b: { since: 'HEAD1', was: 'pushed-back' } })
     }).pipe(Effect.scoped))
 
+  it.effect('an opinion carries to a new head for decisions whose change is the same', () =>
+    Effect.gen(function* () {
+      const decision = (id: string, path: string): Decision => ({ id, title: id, lens: 'architecture', reason: 'data-model', theme: 't', note: 'n', existing: null, authorWhy: null, files: [{ path, ranges: [] }] })
+      const [base] = opinionReply.decisions
+      const reply: AgentOpinion = { decisions: ['a', 'b'].map((id) => ({ ...base!, decisionId: id, findings: [{ ...base!.findings[0]!, title: id }] })) }
+      const { agent, client } = setup({
+        files: [{ path: 'src/a.ts', additions: 1, deletions: 0 }, { path: 'src/b.ts', additions: 1, deletions: 0 }],
+        // Between the two heads only b.ts changed.
+        diff: (_from, to, paths) => (to === 'HEAD2' && paths.includes('src/b.ts') ? 'changed' : 'd'),
+        sorts: [
+          { decisions: [decision('a', 'src/a.ts'), decision('b', 'src/b.ts')], skim: [], claims: [] },
+          { decisions: [decision('a-renamed', 'src/a.ts'), decision('b', 'src/b.ts')], skim: [], claims: [] },
+        ],
+        opinions: [reply],
+      })
+      const c = yield* client
+      const last = <A>(s: Stream.Stream<A, unknown>) => Effect.map(Stream.runCollect(s), (e) => e.at(-1)!)
+      yield* Stream.runCollect(c.Sort({ ref, headSha: 'HEAD1' }))
+      const first = yield* last(c.Opinion({ ref, headSha: 'HEAD1', run: true }))
+      const aId = first._tag === 'Done' ? first.opinion.decisions[0]!.findings[0]!.id : ''
+      yield* c.SetFindingState({ ref, headSha: 'HEAD1', findingId: aId, state: 'dismissed' })
+      // Nothing to match against until the new head is sorted.
+      assert.deepStrictEqual(tags(yield* Stream.runCollect(c.Opinion({ ref, headSha: 'HEAD2', run: false }))), ['Idle'])
+      yield* Stream.runCollect(c.Sort({ ref, headSha: 'HEAD2' }))
+      const carried = yield* last(c.Opinion({ ref, headSha: 'HEAD2', run: false }))
+      assert.isTrue(carried._tag === 'Done')
+      if (carried._tag !== 'Done') return
+      assert.strictEqual(carried.opinion.carriedFrom, 'HEAD1')
+      // b's own change differs, so only a's opinion carries, under the new decision id, with its finding state.
+      assert.deepStrictEqual(carried.opinion.decisions.map((d) => [d.decisionId, d.findings.map((f) => [f.id, f.decisionId])]), [['a-renamed', [[aId, 'a-renamed']]]])
+      assert.deepStrictEqual(carried.states, { [aId]: 'dismissed' })
+      assert.strictEqual(opinionCalls(agent.calls), 1)
+      // Running replaces it.
+      const ran = yield* last(c.Opinion({ ref, headSha: 'HEAD2', run: true }))
+      assert.strictEqual(opinionCalls(agent.calls), 2)
+      assert.notProperty(ran._tag === 'Done' ? ran.opinion : {}, 'carriedFrom')
+      const after = yield* last(c.Opinion({ ref, headSha: 'HEAD2', run: false }))
+      assert.isTrue(after._tag === 'Done' && !('carriedFrom' in after.opinion))
+    }).pipe(Effect.scoped))
+
   it.live('a rebase that only moved the base carries the verdict', () =>
     Effect.gen(function* () {
       const remote = makeRemote()

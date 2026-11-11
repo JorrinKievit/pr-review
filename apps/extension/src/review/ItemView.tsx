@@ -178,6 +178,7 @@ export function ItemView(props: {
           states={props.opinion.states}
         />
       )}
+      {item.kind === 'findings' && props.opinion?.opinion.ticketNote && <p className="mb-2 text-sm text-dim">Ticket: {props.opinion.opinion.ticketNote}</p>}
       {item.kind === 'findings' && props.opinion && (
         <FindingsList
           findings={props.opinion.opinion.decisions.flatMap((d) => d.findings)}

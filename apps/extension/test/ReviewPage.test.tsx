@@ -585,8 +585,9 @@ test('no opinion runs until the button is pressed', async () => {
 })
 
 test('findings list ranks blocks first and opens the decision', async () => {
-  renderPage({ opinion: { cached: opinion } })
+  renderPage({ opinion: { cached: { ...opinion, ticketNote: 'No ticket reference found' } } })
   await heading("Claude's findings")
+  screen.getByText('Ticket: No ticket reference found')
   // A closed theme shows the worst open finding of its decisions; each decision shows its own once open.
   expect(within(nav()).getByRole('button', { name: /^t/ })).toHaveTextContent('Blocks')
   expect(within(nav()).getByRole('button', { name: /Claude's findings/ })).toHaveTextContent(/1.*1.*1/)

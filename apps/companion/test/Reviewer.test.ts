@@ -1,10 +1,11 @@
 import { assert, describe, it } from '@effect/vitest'
-import { type AgentAccount, AgentError, type AgentQuick, type FileStat, type AgentOpinion, type AgentSort, type Decision, type Phase } from '@pr-review/domain'
+import { type AgentAccount, AgentError, type AgentQuick, type FileStat, type AgentOpinion, type AgentSort, type Decision, type Phase, type SortResult } from '@pr-review/domain'
 import { Deferred, Effect, Fiber, Layer, Option, Stream } from 'effect'
 import { KeyValueStore } from 'effect/persistence'
 import { Opiner } from '../src/Opiner.ts'
 import { Reviewer } from '../src/Reviewer.ts'
 import { Sorter } from '../src/Sorter.ts'
+import type { GitHubClient } from '../src/GitHub.ts'
 import { Store } from '../src/Store.ts'
 import { type TicketSummary, Tickets } from '../src/Tickets.ts'
 import { type AgentCall, configLayer, fakeAccount, fakeAccount2, fakeAgent, fakeGit, fakeGitHub, ref } from './fakes.ts'
@@ -37,15 +38,16 @@ const setup = (
     opinion?: (call: AgentCall) => Effect.Effect<unknown, AgentError>
     sort?: (call: AgentCall) => Effect.Effect<unknown, AgentError>
     ticket?: Effect.Effect<TicketSummary>
+    github?: Partial<GitHubClient>
   } = {},
 ) => {
   const agent = fakeAgent(
-    (call) => (call.log.kind === 'opinion' ? (o.opinion?.(call) ?? Effect.succeed(opinionOn(call.prompt))) : (o.sort?.(call) ?? Effect.succeed(sortOf(o.decisions ?? many)))),
+    (call) => (call.log.kind === 'opinion' || call.log.kind === 'deeper' ? (o.opinion?.(call) ?? Effect.succeed(opinionOn(call.prompt))) : (o.sort?.(call) ?? Effect.succeed(sortOf(o.decisions ?? many)))),
     undefined,
     o.pool,
   )
   const files = o.stats ?? (o.decisions ?? many).map((d) => ({ path: d.files[0]!.path, additions: 100, deletions: 1 }))
-  const deps = Layer.mergeAll(agent.layer, fakeGit({ files, diff: 'THE DIFF' }).layer, fakeGitHub(), configLayer(), Layer.succeed(Tickets, Tickets.of({ summary: () => o.ticket ?? Effect.succeed({ text: null, note: 'none' }) })))
+  const deps = Layer.mergeAll(agent.layer, fakeGit({ files, diff: 'THE DIFF' }).layer, fakeGitHub(o.github), configLayer(), Layer.succeed(Tickets, Tickets.of({ summary: () => o.ticket ?? Effect.succeed({ text: null, note: 'none' }) })))
   const layer = Reviewer.layer.pipe(Layer.provideMerge(Opiner.layer), Layer.provideMerge(Sorter.layer), Layer.provideMerge(Store.layerWith(KeyValueStore.layerMemory)), Layer.provideMerge(deps))
   return { agent, layer }
 }
@@ -123,6 +125,73 @@ describe('Reviewer', () => {
       assert.deepStrictEqual(r.opinion?.decisions.map((d) => [d.decisionId, d.authorCase]), [['changes', 'case for 7']])
       assert.isTrue(sorted?.quick)
       assert.strictEqual(opined?.decisions.length, 1)
+    }))
+
+  it.effect('Dig deeper works on a quick PR', () =>
+    Effect.gen(function* () {
+      const { agent, layer } = quickSetup([stat('src/a.ts', 30)])
+      const deeper = yield* Effect.gen(function* () {
+        yield* review
+        return yield* (yield* Opiner).deeper(ref, 'HEAD1', 'changes')
+      }).pipe(Effect.provide(layer))
+      assert.deepInclude(deeper, { decisionId: 'changes', authorCase: 'case changes', deep: true })
+      assert.deepStrictEqual(idsIn(agent.calls.at(-1)!), ['changes'])
+    }))
+
+  it.effect('Run again on a quick PR keeps a real opinion', () =>
+    Effect.gen(function* () {
+      let above = 'sha8'
+      const entry = (number: number, baseRef: string, headRef: string, headSha: string) => ({ number, title: `#${number}`, baseRef, headRef, headSha })
+      const { agent, layer } = setup({
+        stats: [stat('src/a.ts', 30)],
+        sort: (call) => Effect.succeed(quickAnswer(call)),
+        github: { listOpenPrs: () => Effect.sync(() => [entry(7, 'master', 'feat', 'HEAD1'), entry(8, 'feat', 'feat2', above)]) },
+      })
+      const again = yield* Effect.gen(function* () {
+        yield* review
+        above = 'sha8-new'
+        return yield* (yield* Opiner).opine(ref, 'HEAD1')
+      }).pipe(Effect.provide(layer))
+      assert.strictEqual(agent.calls.filter((c) => c.log.kind === 'opinion').length, 1)
+      assert.deepStrictEqual(again.decisions.map((d) => [d.decisionId, d.authorCase]), [['changes', 'case changes']])
+    }))
+
+  it.effect('a quick sort cached without its opinion judges the change as a whole again', () =>
+    Effect.gen(function* () {
+      const { agent, layer } = setup({ stats: [stat('src/a.ts', 30)] })
+      const quickSort: SortResult = {
+        headSha: 'HEAD1',
+        mergeBase: 'MB1',
+        summary: 'Adds a thing.',
+        decisions: [],
+        skim: [{ area: 'Changes', summary: 'Adds a thing.', files: ['src/a.ts'] }],
+        trusted: [],
+        claims: [],
+        unclaimedDecisionIds: [],
+        lines: { decision: 0, skim: 30, trusted: 0 },
+        quick: true,
+      }
+      const r = yield* Effect.gen(function* () {
+        yield* (yield* Sorter).remember(ref, 'HEAD1', quickSort)
+        return yield* review
+      }).pipe(Effect.provide(layer))
+      assert.deepStrictEqual(turns(agent.calls), ['1/fake/0/main/opinion'])
+      assert.deepStrictEqual(idsIn(agent.calls[0]!), ['changes'])
+      assert.isUndefined(r.opinionError)
+      assert.deepStrictEqual(r.opinion?.decisions.map((d) => d.decisionId), ['changes'])
+    }))
+
+  it.effect('a sort with no decisions says there is nothing to judge, and caches no opinion', () =>
+    Effect.gen(function* () {
+      const { agent, layer } = setup({ decisions: [], stats: [stat('src/a.ts', 300)] })
+      const { r, opined } = yield* Effect.gen(function* () {
+        const r = yield* review
+        return { r, opined: yield* (yield* Opiner).cached(ref, 'HEAD1') }
+      }).pipe(Effect.provide(layer))
+      assert.strictEqual(r.opinionError, 'Nothing to judge')
+      assert.isNull(r.opinion)
+      assert.isUndefined(opined)
+      assert.deepStrictEqual(turns(agent.calls), ['1/fake/0/main/sort'])
     }))
 
   it.effect('sort and high-impact opinion run in one session, low-impact on an idle second account', () =>

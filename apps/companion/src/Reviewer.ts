@@ -5,7 +5,7 @@ import { Agent, type AgentTurns, type SessionOptions } from './Agent.ts'
 import { Config } from './Config.ts'
 import { Git } from './Git.ts'
 import { GitHub } from './GitHub.ts'
-import { type OpinionContext, Opiner } from './Opiner.ts'
+import { judged, type OpinionContext, Opiner, quickDecision } from './Opiner.ts'
 import { type SortError, Sorter } from './Sorter.ts'
 import { Store } from './Store.ts'
 import { type TicketSummary, Tickets } from './Tickets.ts'
@@ -93,17 +93,7 @@ export class Reviewer extends Context.Service<
         if (!ticket.pollUnsafe()) yield* t.worker('quick', 0, (w) => ({ ...w, step: 'Reading the ticket' }))
         yield* Fiber.join(ticket)
         const c = yield* Fiber.join(contextFiber).pipe(Effect.onError(() => t.end('quick', 'failed')))
-        const changes: Decision = {
-          id: 'changes',
-          title: 'The change as a whole',
-          lens: 'quality',
-          reason: 'convention',
-          theme: 'Changes',
-          note: '',
-          existing: null,
-          authorWhy: null,
-          files: rest.map((f) => ({ path: f.path, ranges: [] })),
-        }
+        const changes = quickDecision({ skim: [{ area: 'Changes', summary: '', files: rest.map((f) => f.path) }] })
         const prompt = `${yield* c.prompt([changes])}\n\n${quickInstructions}`
         const options: SessionOptions = {
           cwd: c.cwd,
@@ -241,10 +231,11 @@ export class Reviewer extends Context.Service<
             const got = yield* Effect.result(Fiber.join(contextFiber))
             if (got._tag === 'Failure') return void (opinionError = got.failure.message)
             const c = (context = got.success)
-            const decisions = sort.decisions
-            if (!decisions.length) return
-            const hi = decisions.filter((d) => impact(d) === 'high')
-            const lo = decisions.filter((d) => impact(d) === 'low')
+            const decisions = judged(sort)
+            if (!decisions.length) return void (opinionError = 'Nothing to judge')
+            // A quick sort's one decision gets the main model, as on the quick path.
+            const hi = sort.quick ? decisions : decisions.filter((d) => impact(d) === 'high')
+            const lo = sort.quick ? [] : decisions.filter((d) => impact(d) === 'low')
             yield* t.begin('opinion', `Judging ${plural(decisions.length, 'decision')}`)
             const other = decisions.length > 4 && hi.length && lo.length ? (yield* agent.idle()).find((a) => a.id !== account.id) : undefined
             Object.assign(main, { phase: 'opinion', judging: other ? hi : [...hi, ...lo] })
@@ -277,9 +268,10 @@ export class Reviewer extends Context.Service<
 
         let opinion: PrOpinion | undefined
         if (context && !opinionError) {
-          const order = new Map(sort.decisions.map((d, i) => [d.id, i]))
+          const decisions = judged(sort)
+          const order = new Map(decisions.map((d, i) => [d.id, i]))
           const answers = [...(high?.decisions ?? []), ...(low?.decisions ?? [])].filter((a) => order.has(a.decisionId))
-          const made = yield* Effect.result(context.finish({ decisions: answers.sort((a, b) => order.get(a.decisionId)! - order.get(b.decisionId)!) }, sort.decisions))
+          const made = yield* Effect.result(context.finish({ decisions: answers.sort((a, b) => order.get(a.decisionId)! - order.get(b.decisionId)!) }, decisions))
           if (made._tag === 'Failure') opinionError = made.failure.message
           else {
             opinion = made.success

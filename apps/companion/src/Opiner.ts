@@ -1,4 +1,4 @@
-import { AgentError, AgentOpinion, type Decision, type DecisionOpinion, type Evidence, type FileStat, type GitError, type PrOpinion, type PrRef, repoSettings, type StackEntry } from '@pr-review/domain'
+import { AgentError, AgentOpinion, type Decision, type DecisionOpinion, type Evidence, type FileStat, type GitError, type PrOpinion, type PrRef, repoSettings, type SortResult, type StackEntry } from '@pr-review/domain'
 import { Context, Effect, Layer, type Stream } from 'effect'
 import { PersistedCache } from 'effect/persistence'
 import { readFileSync } from 'node:fs'
@@ -69,6 +69,22 @@ export const anchorHunks = (git: Git['Service'], repoKey: string, mergeBase: str
   const asked = files.filter((f) => wanted.has(f.path)).flatMap((f) => (f.previous ? [f.previous, f.path] : [f.path]))
   return asked.length ? Effect.map(git.diff(repoKey, mergeBase, head, asked), hunkLines) : Effect.succeed<Hunks>(new Map())
 }
+
+/** The one decision a quick sort is judged on: the change as a whole, over its Changes area. */
+export const quickDecision = (sort: Pick<SortResult, 'skim'>): Decision => ({
+  id: 'changes',
+  title: 'The change as a whole',
+  lens: 'quality',
+  reason: 'convention',
+  theme: 'Changes',
+  note: '',
+  existing: null,
+  authorWhy: null,
+  files: (sort.skim.find((s) => s.area === 'Changes')?.files ?? []).map((path) => ({ path, ranges: [] })),
+})
+
+/** What an opinion judges: the sort's decisions, or the quick decision on a quick sort. */
+export const judged = (sort: SortResult): ReadonlyArray<Decision> => (sort.quick ? [quickDecision(sort)] : sort.decisions)
 
 /** What opinion turns on one head share; see `Opiner.context`. */
 export type OpinionContext = {
@@ -203,8 +219,10 @@ export class Opiner extends Context.Service<
         const ref = { host, owner, repo, number }
         const report = steps.report(only ? `${keyOf(key)}/${only}` : keyOf(key))
         const [sort, c] = yield* Effect.all([sorter.sort(ref, headSha), context(ref, headSha, report)], { concurrency: 2 })
-        const decisions = only ? sort.decisions.filter((d) => d.id === only) : sort.decisions
+        const decisions = only ? judged(sort).filter((d) => d.id === only) : judged(sort)
         if (only && decisions.length === 0) return yield* new AgentError({ message: `This PR has no decision ${only} to dig into` })
+        // Failures aren't cached, so an empty opinion never replaces a real one.
+        if (decisions.length === 0) return yield* new AgentError({ message: 'Nothing to judge' })
         const answer = yield* agent.structured({
           prompt: yield* c.prompt(decisions, { deep: only !== undefined }),
           schema: AgentOpinion,

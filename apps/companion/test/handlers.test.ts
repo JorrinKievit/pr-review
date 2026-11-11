@@ -492,7 +492,7 @@ describe('handlers', () => {
   it.effect('Opinion run true re-runs when a PR above has a new head', () =>
     Effect.gen(function* () {
       let above = 'sha8'
-      const { agent, client } = setup({ github: { listOpenPrs: () => Effect.sync(() => [entry(7, 'master', 'feat'), { ...entry(8, 'feat', 'feat2'), headSha: above }]) } })
+      const { agent, client } = setup({ sorts: [{ decisions: [d1], skim: [], claims: [] }], github: { listOpenPrs: () => Effect.sync(() => [entry(7, 'master', 'feat'), { ...entry(8, 'feat', 'feat2'), headSha: above }]) } })
       const c = yield* client
       const run = Stream.runCollect(c.Opinion({ ref, headSha: 'HEAD1', run: true }))
       yield* run
@@ -529,7 +529,7 @@ describe('handlers', () => {
 
   it.effect('SetFindingState saves and clears', () =>
     Effect.gen(function* () {
-      const c = yield* setup().client
+      const c = yield* setup({ sorts: [{ decisions: [d1], skim: [], claims: [] }] }).client
       yield* Stream.runCollect(c.Opinion({ ref, headSha: 'HEAD1', run: true }))
       yield* c.SetFindingState({ ref, headSha: 'HEAD1', findingId: 'a', state: 'posted' })
       yield* c.SetFindingState({ ref, headSha: 'HEAD1', findingId: 'b', state: 'dismissed' })

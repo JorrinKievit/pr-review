@@ -253,6 +253,23 @@ describe('Agent.ticket', () => {
       assert.deepStrictEqual(models, ['sonnet'])
     }))
 
+  it.live('never waits on a slot: a session holding the last one can join its own ticket read', () =>
+    Effect.gen(function* () {
+      const { layer, opened } = setup((_a, p) => Effect.succeed(p.startsWith('Fetch') ? 'the ticket' : '{"ok": true}'), [{ ...account('a'), tickets: true }])
+      const got = yield* Effect.gen(function* () {
+        const agent = yield* Agent
+        return yield* agent.session({ cwd: '/repo', log }, (turns) =>
+          Effect.gen(function* () {
+            const read = yield* Effect.forkChild(agent.ticket({ prompt: 'Fetch ABC-1', log: { ...log, kind: 'ticket' } }))
+            yield* turns.structured('Sort this', Ok)
+            return yield* Fiber.join(read)
+          }),
+        )
+      }).pipe(Effect.provide(layer), Effect.timeout('2 seconds'))
+      assert.strictEqual(got, 'the ticket')
+      assert.deepStrictEqual(opened.map((o) => o.account), ['a', 'a'])
+    }))
+
   it.live('without such an account it says so', () =>
     Effect.gen(function* () {
       const { layer } = setup(() => Effect.succeed('x'), [account('a'), { ...account('b'), tickets: true, enabled: false }])

@@ -59,7 +59,10 @@ export class Agent extends Context.Service<
 
       const eligible = (a: AgentAccount, tickets: boolean) => a.enabled && (!tickets || a.tickets === true)
 
-      /** The least busy account with room, held until the scope closes. Waits while all are busy. */
+      /**
+       * The least busy account with room, held until the scope closes. Waits while all are busy.
+       * Ticket reads skip that wait: a session can hold the last slot while it waits on its own ticket.
+       */
       const acquire = (o: Opts, avoid: ReadonlySet<string>, only?: string, tickets = false) =>
         Effect.acquireRelease(
           Effect.gen(function* () {
@@ -84,7 +87,7 @@ export class Agent extends Context.Service<
                 return yield* new AgentError({ message: `Every AI account is sitting out until ${new Date(next).toLocaleTimeString()}${reasons ? `: ${reasons}` : ''}` })
               }
               const load = (a: AgentAccount) => stateOf(a.id).busy / Math.max(1, a.concurrency)
-              const free = ready.filter((a) => stateOf(a.id).busy < a.concurrency).sort((a, b) => load(a) - load(b))[0]
+              const free = ready.filter((a) => tickets || stateOf(a.id).busy < a.concurrency).sort((a, b) => load(a) - load(b))[0]
               if (free) {
                 stateOf(free.id).busy++
                 return free

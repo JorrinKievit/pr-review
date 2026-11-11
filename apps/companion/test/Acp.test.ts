@@ -127,17 +127,18 @@ describe('Acp', () => {
       const answers: boolean[] = []
       const agent = fakeAgent({
         turn: async (_say, ask) => {
-          answers.push(await ask('git log -1'), await ask('cat a', 'read'), await ask('mcp__tracker__getIssue', 'other'), await ask('mcp__tracker__addComment', 'other'))
+          answers.push(await ask('git log -1'), await ask('cat a', 'read'), await ask('https://evil.example', 'fetch'), await ask('issues', 'search'), await ask('mcp__tracker__getIssue', 'other'), await ask('mcp__tracker__addComment', 'other'))
           return 'end_turn'
         },
       })
       yield* run(agent, (s) => collect(s.prompt('go')), account, undefined, { tickets: true })
-      assert.deepStrictEqual(answers, [false, true, true, false])
+      assert.deepStrictEqual(answers, [false, false, false, true, true, false])
       const options = (i: number) => (agent.seen.meta[i] as { claudeCode: { options: { settingSources: string[]; disallowedTools: string[] } } }).claudeCode.options
       assert.deepStrictEqual(options(0).settingSources, ['user'])
-      assert.include(options(0).disallowedTools, 'Edit')
+      for (const tool of ['Edit', 'Read', 'Glob', 'Grep', 'Bash', 'WebFetch', 'WebSearch']) assert.include(options(0).disallowedTools, tool)
       yield* run(agent, () => Effect.void)
       assert.deepStrictEqual(options(1).settingSources, [])
+      assert.notInclude(options(1).disallowedTools, 'Read')
     }))
 
   it.live('picks a read-only mode the agent offers, or the account mode, and the account model', () =>

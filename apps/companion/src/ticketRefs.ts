@@ -3,6 +3,7 @@ export type TicketRef = { kind: 'github'; owner?: string; repo?: string; number:
 const MAX = 3
 const TOKENS = /(https?:\/\/[^\s<>()[\]]+)|(?<![\w/&])#(\d+)\b|\b([A-Z][A-Z0-9]+-\d+)\b/g
 const TICKET_PATH = /\/(browse|issues?)\//
+const NOT_TICKETS = new Set(['UTF', 'SHA', 'ISO', 'RFC', 'HTTP', 'TLS', 'AES', 'MD', 'X'])
 
 /** Ticket references in PR text, in order of appearance: GitHub issues on `host`, tracker URLs elsewhere, and `ABC-123` keys. */
 export const ticketRefs = (text: string, host: string): TicketRef[] => {
@@ -11,7 +12,7 @@ export const ticketRefs = (text: string, host: string): TicketRef[] => {
   const add = (list: unknown[], r: unknown, key = JSON.stringify(r)) => list.some((x) => JSON.stringify(x) === key) || list.push(r)
   for (const [, rawUrl, number, key] of text.matchAll(TOKENS)) {
     if (number) add(github, { kind: 'github', number: Number(number) })
-    else if (key) add(other, key)
+    else if (key) { if (!NOT_TICKETS.has(key.slice(0, key.lastIndexOf('-')))) add(other, key) }
     else if (rawUrl) {
       const url = rawUrl.replace(/[.,;:!?'"]+$/, '')
       let u: URL

@@ -23,8 +23,8 @@ export type Launch = (account: AgentAccount, cwd: string) => Effect.Effect<{ tar
 // Claude Code's own settings could allow tools past the gate; its ACP adapter takes SDK options here.
 const disallowedTools = ['Edit', 'Write', 'NotebookEdit', 'WebFetch', 'WebSearch', 'Task']
 const claudeOptions = { claudeCode: { options: { settingSources: [], disallowedTools } } }
-// The ticket session loads the user's own config so their tracker MCP servers are there; it never sees PR code.
-const ticketOptions = { claudeCode: { options: { settingSources: ['user'], disallowedTools } } }
+// The ticket session loads the user's own config so their tracker MCP servers are there; it never sees PR code, and can't read files or fetch URLs.
+const ticketOptions = { claudeCode: { options: { settingSources: ['user'], disallowedTools: [...disallowedTools, 'Read', 'Glob', 'Grep', 'Bash'] } } }
 const READ_ONLY_MODES = [/read.?only/i, /^ask$/i, /^plan$/i, /^default$/i, /manual/i]
 
 const agentError = (e: unknown, output = '') =>

@@ -23,6 +23,10 @@ describe('ticketRefs', () => {
     ])
   })
 
+  it('UTF-8 and SHA-256 are not tickets', () => {
+    assert.deepStrictEqual(ticketRefs('Encode as UTF-8, hash with SHA-256 per RFC-7231 over HTTP-2, ISO-8601 dates, for CORE-1', 'github.com'), [{ kind: 'other', ref: 'CORE-1' }])
+  })
+
   it('deduplicates and caps', () => {
     const refs = ticketRefs('#1 #1 #2 #3 #4 AB-1 AB-1 BC-2 CD-3 DE-4', 'github.com')
     assert.deepStrictEqual(refs, [

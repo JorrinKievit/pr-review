@@ -195,6 +195,8 @@ export class Opiner extends Context.Service<
                 `# Stack (bottom first; compare a PR with the one below it using git diff <head below> <its head>)\n${stackText.join('\n\n') || '(not stacked)'}`,
                 `# PR #${number}: ${pr.title} (by ${pr.author})\n\n${pr.body || '(no description)'}`,
                 `# Decisions\n${JSON.stringify(decisions)}`,
+                // Here, not in the skill: a repo's own skill must still show which decision is being judged.
+                '# Progress\nBefore you judge each decision, write a line `Judging: <decisionId>` on its own.',
                 o.continued
                   ? `# Diff\nIn the sort above; read files again with git show ${head}:<path> where you need more.`
                   : diff === undefined || diff.length > review.maxDiffKb * 1000

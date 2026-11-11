@@ -118,6 +118,8 @@ describe('Opiner', () => {
       yield* opine.pipe(Effect.provide(layer))
       assert.match(agent.calls[0]!.prompt, /CUSTOM SKILL/)
       assert.notMatch(agent.calls[0]!.prompt, /pr-opinion/)
+      // The progress marker comes from the companion, so a custom skill still shows the decision being judged.
+      assert.match(agent.calls[0]!.prompt, /write a line `Judging: <decisionId>`/)
     }))
 
   it.effect('a repo review skill missing at the default branch falls back to the bundled one', () =>

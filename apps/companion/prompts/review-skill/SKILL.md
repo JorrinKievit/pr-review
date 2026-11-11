@@ -45,8 +45,6 @@ The PR may be one of a stack, listed under "Stack" bottom first. Use it as conte
 
 Give one opinion per decision under "Decisions", in that order, with its `decisionId`. Read shared context (rules, existing code) once and reuse it across decisions.
 
-Before you judge each decision, write a line `Judging: <decisionId>` on its own.
-
 1. Read the decision's hunks, the whole of each changed file at the head, and enough around them to understand them.
 2. State the author's best case in `authorCase`: one or two sentences, from the PR body when it gives a reason.
 3. Test that case against the yardsticks and report findings. Weak or local reasons don't save a choice that has a better standard way.

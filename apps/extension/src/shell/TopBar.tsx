@@ -1,9 +1,43 @@
-import type { PrRef, PrView } from '@pr-review/domain'
+import { useAtomRefresh, useAtomValue } from '@effect/atom-react'
+import type { OpinionEvent, PrRef, PrView } from '@pr-review/domain'
+import { AsyncResult } from 'effect/reactivity'
+import { useAtoms } from '../atoms.ts'
+import { failureOf } from '../result.ts'
 import { ReviewPopover } from '../review/ReviewPopover.tsx'
 import { githubFilesUrl } from '../Setup.tsx'
-import { Kbd, Pill } from '../ui/index.tsx'
+import { Button, Kbd, Pill, Working } from '../ui/index.tsx'
 
-export function TopBar(props: { prRef: PrRef; pr: PrView; decided: number; total: number; reviewOpen: boolean; onReviewOpenChange: (open: boolean) => void }) {
+/** A run of Claude's opinion: its step while working, nothing once done. */
+function OpinionRun({ prRef, headSha }: { prRef: PrRef; headSha: string }) {
+  const atom = useAtoms().opinionAtom(prRef, headSha, true)
+  const result = useAtomValue(atom)
+  const retry = useAtomRefresh(atom)
+  if (AsyncResult.isFailure(result))
+    return (
+      <span className="flex items-center gap-1.5 text-destructive">
+        The opinion failed: {String((failureOf(result) as { message?: string } | undefined)?.message ?? 'unknown error')}
+        <Button size="xs" variant="outline" onClick={retry}>
+          Try again
+        </Button>
+      </span>
+    )
+  const e = AsyncResult.isSuccess(result) ? result.value : undefined
+  if (e?._tag === 'Done') return null
+  return <Working className="max-w-72" step={e?._tag === 'Running' ? e.step : undefined} startedAt={e?._tag === 'Running' ? e.startedAt : undefined} />
+}
+
+export function TopBar(props: {
+  prRef: PrRef
+  pr: PrView
+  decided: number
+  total: number
+  reviewOpen: boolean
+  onReviewOpenChange: (open: boolean) => void
+  /** The cached opinion; `Idle` offers to run one. */
+  opinion: OpinionEvent | undefined
+  running: boolean
+  onRunOpinion: () => void
+}) {
   const { pr } = props
   const position = pr.stack.findIndex((s) => s.number === pr.number)
   return (
@@ -23,7 +57,18 @@ export function TopBar(props: { prRef: PrRef; pr: PrView; decided: number; total
           </Pill>
         </a>
       )}
-      <span className="ml-auto flex items-center gap-2" aria-label="Items reviewed">
+      <span className="ml-auto flex min-w-0 items-center">
+        {props.running ? (
+          <OpinionRun prRef={props.prRef} headSha={pr.headSha} />
+        ) : (
+          props.opinion?._tag === 'Idle' && (
+            <Button size="xs" variant="outline" onClick={props.onRunOpinion}>
+              Claude's opinion
+            </Button>
+          )
+        )}
+      </span>
+      <span className="flex items-center gap-2" aria-label="Items reviewed">
         {props.decided} / {props.total} reviewed
         <i className="block h-1 w-16 overflow-hidden rounded-sm bg-border">
           <b className="block h-full bg-ok" style={{ width: `${props.total ? (props.decided / props.total) * 100 : 0}%` }} />

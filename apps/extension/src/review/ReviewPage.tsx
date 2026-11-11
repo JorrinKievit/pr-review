@@ -1,8 +1,8 @@
-import { useAtomRefresh, useAtomSet, useAtomValue } from '@effect/atom-react'
+import { RegistryContext, useAtomRefresh, useAtomSet, useAtomValue } from '@effect/atom-react'
 import type { DecisionState, DecisionStates, PrRef, PrView, SortEvent } from '@pr-review/domain'
 import { useHotkeys } from '@tanstack/react-hotkeys'
 import { AsyncResult } from 'effect/reactivity'
-import { useMemo, useState } from 'react'
+import { useContext, useMemo, useState } from 'react'
 import { useAtoms } from '../atoms.ts'
 import { useRemembered } from '../remembered.ts'
 import { failureOf, isUnavailable } from '../result.ts'
@@ -13,7 +13,8 @@ import { Sidebar } from '../shell/Sidebar.tsx'
 import { TopBar } from '../shell/TopBar.tsx'
 import { Button, Spinner } from '../ui/index.tsx'
 import { ChatPanel } from './ChatPanel.tsx'
-import { buildItems, itemId, nextOpen, startAt } from './items.ts'
+import { isOpen } from './Findings.tsx'
+import { buildItems, itemId, nextOpen, stackMoved, startAt } from './items.ts'
 import { ItemView } from './ItemView.tsx'
 
 export function ReviewPage({ prRef }: { prRef: PrRef }) {
@@ -38,13 +39,22 @@ export function ReviewPage({ prRef }: { prRef: PrRef }) {
 }
 
 function Loaded({ prRef, pr }: { prRef: PrRef; pr: PrView }) {
-  const { sortAtom, stateAtom } = useAtoms()
+  const { sortAtom, stateAtom, opinionAtom } = useAtoms()
   const sortAtomForHead = sortAtom(prRef, pr.headSha)
   const sortResult = useAtomValue(sortAtomForHead)
   const retrySort = useAtomRefresh(sortAtomForHead)
   const saveState = useAtomSet(stateAtom)
   const sort: SortEvent | undefined = AsyncResult.isSuccess(sortResult) ? sortResult.value : undefined
-  const items = useMemo(() => buildItems(pr, sort), [pr, sort])
+  // Shows the cached opinion only; a run happens once asked for and refreshes this when done.
+  const opinionResult = useAtomValue(opinionAtom(prRef, pr.headSha, false))
+  const opinion = AsyncResult.isSuccess(opinionResult) ? opinionResult.value : undefined
+  const done = opinion?._tag === 'Done' ? opinion : undefined
+  const [runningOpinion, setRunningOpinion] = useState(false)
+  // Not useAtomRefresh: that mounts the atom, which would run the opinion on open.
+  const registry = useContext(RegistryContext)
+  const items = useMemo(() => buildItems(pr, sort, opinion), [pr, sort, opinion])
+  const openFindings = done ? done.opinion.decisions.flatMap((d) => d.findings).filter((f) => isOpen(f, done.states)) : []
+  const titles = Object.fromEntries(items.flatMap((i) => (i.kind === 'decision' ? [[i.decision.id, i.decision.title]] : [])))
 
   const [selectedKey, setSelectedKey] = useRemembered<string | undefined>(`at:${prRef.host}/${prRef.owner}/${prRef.repo}#${prRef.number}`, undefined)
   const [overrides, setOverrides] = useState<Record<string, DecisionState | null>>({})
@@ -119,7 +129,32 @@ function Loaded({ prRef, pr }: { prRef: PrRef; pr: PrView }) {
 
   return (
     <div className="flex h-full flex-col">
-      <TopBar prRef={prRef} pr={pr} decided={decided} total={reviewable.length} reviewOpen={reviewOpen} onReviewOpenChange={setReviewOpen} />
+      <TopBar
+        prRef={prRef}
+        pr={pr}
+        decided={decided}
+        total={reviewable.length}
+        reviewOpen={reviewOpen}
+        onReviewOpenChange={setReviewOpen}
+        opinion={opinion}
+        running={runningOpinion}
+        onRunOpinion={() => setRunningOpinion(true)}
+      />
+      {done && !runningOpinion && stackMoved(pr, done.opinion.stackHeads) && (
+        <div className="flex items-center gap-3 border-b border-border bg-info/10 px-3 py-1.5 text-sm">
+          <span>The stack moved since this opinion.</span>
+          <Button
+            size="xs"
+            variant="outline"
+            onClick={() => {
+              registry.refresh(opinionAtom(prRef, pr.headSha, true))
+              setRunningOpinion(true)
+            }}
+          >
+            Run again
+          </Button>
+        </div>
+      )}
       {AsyncResult.isFailure(sortResult) && (
         <div className="flex items-center gap-3 border-b border-border bg-destructive/10 px-3 py-1.5 text-sm">
           <span>The sort failed: {String((failureOf(sortResult) as { message?: string } | undefined)?.message ?? 'unknown error')}. Files stay unsorted.</span>
@@ -129,7 +164,15 @@ function Loaded({ prRef, pr }: { prRef: PrRef; pr: PrView }) {
         </div>
       )}
       <div className="flex min-h-0 flex-1">
-        <Sidebar items={items} selected={index} states={states} rereview={rereview} result={sort?._tag === 'Done' ? sort.result : undefined} onSelect={select} />
+        <Sidebar
+          items={items}
+          selected={index}
+          states={states}
+          rereview={rereview}
+          result={sort?._tag === 'Done' ? sort.result : undefined}
+          findings={openFindings}
+          onSelect={select}
+        />
         <main key={item.key} className="min-w-0 flex-1 overflow-y-auto">
           <ItemView
             key={item.key}
@@ -145,6 +188,9 @@ function Loaded({ prRef, pr }: { prRef: PrRef; pr: PrView }) {
             onCommentDone={() => setCommentingOn(undefined)}
             {...(index < items.length - 1 ? { onNext: () => select(index + 1) } : {})}
             {...(sort?._tag === 'Running' ? { sorting: sort } : {})}
+            opinion={done}
+            titles={titles}
+            onOpenDecision={(id) => select(items.findIndex((i) => i.kind === 'decision' && i.decision.id === id))}
           />
         </main>
         {chatOpen && decision && <ChatPanel key={decision.id} prRef={prRef} headSha={pr.headSha} decision={decision} focus={chatFocus} />}

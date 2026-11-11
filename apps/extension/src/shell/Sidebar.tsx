@@ -1,14 +1,25 @@
-import type { DecisionStates, Rereview, SortResult } from '@pr-review/domain'
+import type { DecisionStates, Finding, Rereview, Severity, SortResult } from '@pr-review/domain'
 import { cn } from '../lib/utils.ts'
-import { type Item, itemFiles, itemId, itemTitle, itemTone } from '../review/items.ts'
+import { SeverityPill, severityLabel, severityTone } from '../review/Findings.tsx'
+import { type Item, itemFiles, itemId, itemTitle, itemTone, worstSeverity } from '../review/items.ts'
 import { Dot, type DotTone, Spinner } from '../ui/index.tsx'
 
 type Row = { item: Item; i: number }
 
 /** Piles in review order. The bar shows where the changed lines went: decisions, skim, trusted. */
-export function Sidebar(props: { items: ReadonlyArray<Item>; selected: number; states: DecisionStates; rereview: Rereview; result: SortResult | undefined; onSelect: (i: number) => void }) {
+export function Sidebar(props: {
+  items: ReadonlyArray<Item>
+  selected: number
+  states: DecisionStates
+  rereview: Rereview
+  result: SortResult | undefined
+  /** Claude's findings still open. */
+  findings: ReadonlyArray<Finding>
+  onSelect: (i: number) => void
+}) {
   const groups = [
     { label: 'PR', kind: 'description' },
+    { label: 'Claude', kind: 'findings' },
     { label: 'Decisions', kind: 'decision' },
     { label: 'Skim', kind: 'skim' },
     { label: 'Trusted', kind: 'trusted' },
@@ -18,6 +29,12 @@ export function Sidebar(props: { items: ReadonlyArray<Item>; selected: number; s
   const total = lines ? lines.decision + lines.skim + lines.trusted || 1 : 1
   const changed = Object.keys(props.rereview).length
   const verdictOf = (item: Item) => props.states[itemId(item) ?? '']
+  const worst = (rows: ReadonlyArray<Row>) => {
+    const ids = new Set(rows.map((r) => itemId(r.item)))
+    const s = worstSeverity(props.findings.filter((f) => ids.has(f.decisionId ?? undefined)))
+    return s && <SeverityPill severity={s} short />
+  }
+  const counts = (['blocks', 'should', 'ask'] as const).map((s): [Severity, number] => [s, props.findings.filter((f) => f.severity === s).length]).filter(([, n]) => n > 0)
 
   const row = ({ item, i }: Row) => (
     <button
@@ -32,7 +49,14 @@ export function Sidebar(props: { items: ReadonlyArray<Item>; selected: number; s
     >
       <Dot tone={itemTone(item, verdictOf(item), (itemId(item) ?? '') in props.rereview)} />
       <span className="min-w-0 flex-1 truncate">{item.kind === 'unsorted' ? 'All files' : itemTitle(item)}</span>
-      {item.kind !== 'decision' && item.kind !== 'description' && <span className="text-xs text-dim">{itemFiles(item).length}</span>}
+      {item.kind === 'decision' && worst([{ item, i }])}
+      {item.kind === 'findings' &&
+        counts.map(([s, n]) => (
+          <span key={s} title={`${n} ${severityLabel[s].toLowerCase()}`} className={cn('text-xs tabular-nums', severityTone[s])}>
+            {n}
+          </span>
+        ))}
+      {item.kind !== 'decision' && item.kind !== 'description' && item.kind !== 'findings' && <span className="text-xs text-dim">{itemFiles(item).length}</span>}
     </button>
   )
 
@@ -53,6 +77,7 @@ export function Sidebar(props: { items: ReadonlyArray<Item>; selected: number; s
         >
           <Dot tone={tone} />
           <span className="min-w-0 flex-1 truncate">{name}</span>
+          {!open && worst(rows)}
           <span className={cn('text-xs tabular-nums', decided.length === rows.length ? 'text-ok' : 'text-dim')}>{`${decided.length}/${rows.length}`}</span>
         </button>
         {open && (
@@ -77,7 +102,7 @@ export function Sidebar(props: { items: ReadonlyArray<Item>; selected: number; s
       {groups.map((g) => {
         const rows = props.items.map((item, i) => ({ item, i })).filter((r) => r.item.kind === g.kind)
         if (rows.length === 0) return null
-        const decided = g.kind === 'unsorted' || g.kind === 'description' ? undefined : rows.filter((r) => verdictOf(r.item)).length
+        const decided = g.kind === 'unsorted' || g.kind === 'description' || g.kind === 'findings' ? undefined : rows.filter((r) => verdictOf(r.item)).length
         return (
           <section key={g.kind}>
             <h3 className="flex justify-between px-2 pt-2.5 pb-1 text-xs font-normal text-dim">
@@ -85,7 +110,7 @@ export function Sidebar(props: { items: ReadonlyArray<Item>; selected: number; s
                 {g.label}
                 {g.kind === 'unsorted' && <Spinner className="size-3" />}
               </span>
-              <span>{decided !== undefined ? `${decided} / ${rows.length}` : g.kind === 'description' ? '' : rows.reduce((n, r) => n + itemFiles(r.item).length, 0)}</span>
+              <span>{decided !== undefined ? `${decided} / ${rows.length}` : g.kind === 'description' || g.kind === 'findings' ? '' : rows.reduce((n, r) => n + itemFiles(r.item).length, 0)}</span>
             </h3>
             {g.kind === 'decision'
               ? [...Map.groupBy(rows, (r) => (r.item.kind === 'decision' ? r.item.decision.theme : '')).entries()].map(([name, rs]) => theme(name, rs))

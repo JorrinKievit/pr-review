@@ -1,5 +1,22 @@
 import { RegistryProvider } from '@effect/atom-react'
-import { type AskEvent, type AskTarget, type Chat, CompanionUnavailable, type Draft, ReviewRejected, type Decision, type PrView, type SortEvent, type SortResult } from '@pr-review/domain'
+import {
+  type AskEvent,
+  type AskTarget,
+  type Chat,
+  CompanionUnavailable,
+  type DecisionOpinion,
+  type DeeperEvent,
+  type Draft,
+  type Finding,
+  type FindingStates,
+  type OpinionEvent,
+  type PrOpinion,
+  ReviewRejected,
+  type Decision,
+  type PrView,
+  type SortEvent,
+  type SortResult,
+} from '@pr-review/domain'
 import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { Deferred, Effect, Exit, Layer, Scope, Stream } from 'effect'
@@ -89,9 +106,17 @@ const renderPage = (
     chats?: Chat[]
     refuseReview?: boolean
     description?: string
+    /** The opinion cached before the page opens, and the one a run gives. */
+    opinion?: { cached?: PrOpinion; run?: PrOpinion }
+    deeper?: () => Stream.Stream<DeeperEvent>
   } = {},
 ) => {
   let drafts: ReadonlyArray<Draft> = []
+  let stored = o.opinion?.cached
+  let findingStates: FindingStates = {}
+  const opinionRuns: boolean[] = []
+  const stateCalls: unknown[] = []
+  const doneEvent = (opinion: PrOpinion): OpinionEvent => ({ _tag: 'Done', opinion, states: findingStates })
   const reviews: unknown[] = []
   const chats: Chat[] = [...(o.chats ?? [])]
   const setStates: unknown[] = []
@@ -122,6 +147,31 @@ const renderPage = (
       GetDrafts: () => Effect.sync(() => drafts),
       GetDescription: () => Effect.succeed(o.description ?? ''),
       SetDrafts: (p) => Effect.sync(() => void (drafts = p.drafts)),
+      // Like the companion: a run is cached, and a deeper look replaces its decision in the cached opinion.
+      Opinion: ({ run }) => {
+        opinionRuns.push(run)
+        if (run && o.opinion?.run) {
+          const result = o.opinion.run
+          return Stream.make({ _tag: 'Running', startedAt: new Date().toISOString(), step: 'Reading the rules' } as OpinionEvent).pipe(
+            Stream.concat(Stream.fromEffect(Effect.sync(() => ((stored = result), doneEvent(result))).pipe(Effect.delay(50)))),
+          )
+        }
+        return Stream.fromEffect(Effect.sync(() => (stored ? doneEvent(stored) : ({ _tag: 'Idle' } as OpinionEvent))))
+      },
+      DigDeeper: () =>
+        (o.deeper?.() ?? Stream.never).pipe(
+          Stream.tap((e) =>
+            Effect.sync(() => {
+              if (e._tag === 'Done' && stored) stored = { ...stored, decisions: stored.decisions.map((d) => (d.decisionId === e.opinion.decisionId ? e.opinion : d)) }
+            }),
+          ),
+        ),
+      SetFindingState: (p) =>
+        Effect.sync(() => {
+          stateCalls.push(p)
+          const { [p.findingId]: _, ...rest } = findingStates
+          findingStates = p.state ? { ...rest, [p.findingId]: p.state } : rest
+        }),
       SubmitReview: (p) =>
         o.refuseReview
           ? Effect.fail(new ReviewRejected({ message: 'Validation Failed' }))
@@ -142,7 +192,7 @@ const renderPage = (
       </AtomsContext.Provider>
     </RegistryProvider>,
   )
-  return { setStates, patches, bases, drafts: () => drafts, reviews }
+  return { setStates, patches, bases, drafts: () => drafts, reviews, opinionRuns, stateCalls }
 }
 
 const heading = (name: string) => screen.findByRole('heading', { name }, { timeout: 3000 })
@@ -474,4 +524,126 @@ test('sidebar says how many decisions changed since you looked', async () => {
   renderPage({ sort: Stream.concat(Stream.make({ ...done, rereview: { one: { since: 'OLD', was: 'accepted' }, two: { since: 'OLD', was: 'accepted' } } } as SortEvent), Stream.never) })
   await heading('Decision one')
   screen.getByText('2 decisions changed since you looked')
+})
+
+const finding = (o: Pick<Finding, 'id' | 'decisionId' | 'severity' | 'title'> & Partial<Finding>): Finding => ({
+  pr: 7, axis: 'standards', kind: 'design', take: `take ${o.id}`, evidence: [], alternative: null, comment: null, anchor: null, handledIn: null, verified: true, ...o,
+})
+const decisionOpinion = (decisionId: string, findings: Finding[], authorCase = `case ${decisionId}`): DecisionOpinion => ({ decisionId, authorCase, checked: null, findings, deep: false })
+const opinion: PrOpinion = {
+  headSha: 'HEAD1', ticket: null, ticketNote: '', stackHeads: {},
+  decisions: [
+    decisionOpinion(
+      'one',
+      [
+        finding({ id: 'f1', decisionId: 'one', severity: 'ask', title: 'Name the timeout', verified: false }),
+        finding({
+          id: 'f2', decisionId: 'one', severity: 'should', kind: 'reuse', title: 'Use the shared client',
+          evidence: [
+            { ref: 'base', path: 'src/client.ts', line: 4, quote: 'export const client = make()' },
+            { ref: 'docs', path: 'TanStack Query', line: 0, quote: 'one QueryClient per app' },
+          ],
+          alternative: 'Import client from src/client.ts.', comment: 'Could this use the shared client?', anchor: { path: 'api.ts', line: 2 },
+        }),
+      ],
+      'Keeps the client next to its only caller.',
+    ),
+    decisionOpinion('two', [finding({ id: 'f3', decisionId: 'two', severity: 'blocks', title: 'Drops the permission check', handledIn: null })]),
+  ],
+}
+const nav = () => screen.getByRole('navigation', { name: 'Review items' })
+/** With no description the page opens on the findings; Decision one is next. */
+const openDecisionOne = async () => {
+  await heading("Claude's findings")
+  await userEvent.keyboard('j')
+  return heading('Decision one')
+}
+
+test('no opinion runs until the button is pressed', async () => {
+  const { opinionRuns } = renderPage({ opinion: { run: opinion } })
+  await heading('Decision one')
+  const button = await screen.findByRole('button', { name: "Claude's opinion" }, { timeout: 3000 })
+  await new Promise((r) => setTimeout(r, 100))
+  expect(opinionRuns).toEqual([false])
+  await userEvent.click(button)
+  expect(opinionRuns.filter((r) => r)).toEqual([true])
+  expect(await screen.findByText('Reading the rules', {}, { timeout: 3000 })).toBeInTheDocument()
+  expect(await within(nav()).findByRole('button', { name: /Claude's findings/ }, { timeout: 3000 })).toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: "Claude's opinion" })).toBeNull()
+})
+
+test('findings list ranks blocks first and opens the decision', async () => {
+  renderPage({ opinion: { cached: opinion } })
+  await heading("Claude's findings")
+  // A closed theme shows the worst open finding of its decisions; each decision shows its own once open.
+  expect(within(nav()).getByRole('button', { name: /^t/ })).toHaveTextContent('Blocks')
+  expect(within(nav()).getByRole('button', { name: /Claude's findings/ })).toHaveTextContent(/1.*1.*1/)
+  const rows = within(screen.getByRole('list', { name: 'Findings' })).getAllByRole('button')
+  expect(rows.map((r) => r.querySelector('b')?.textContent)).toEqual(['Drops the permission check', 'Use the shared client', 'Name the timeout'])
+  expect(rows[0]).toHaveTextContent('Blocks merge')
+  expect(rows[0]).toHaveTextContent('Decision two')
+  await userEvent.click(rows[0]!)
+  expect(await heading('Decision two')).toBeInTheDocument()
+  expect(within(nav()).getByRole('button', { name: /Decision one/ })).toHaveTextContent('Should fix')
+  expect(within(nav()).getByRole('button', { name: /Decision two/ })).toHaveTextContent('Blocks')
+})
+
+test('decision shows its findings with evidence and Use as comment saves a draft at the anchor', async () => {
+  const { drafts, stateCalls } = renderPage({ opinion: { cached: opinion } })
+  await openDecisionOne()
+  expect(screen.getByText('Keeps the client next to its only caller.')).toBeInTheDocument()
+  const shared = screen.getByRole('region', { name: 'Use the shared client' })
+  within(shared).getByText('Should fix')
+  within(shared).getByText('src/client.ts:4')
+  within(shared).getByText('export const client = make()')
+  within(shared).getByText(/TanStack Query/)
+  within(shared).getByText('Import client from src/client.ts.')
+  within(screen.getByRole('region', { name: 'Name the timeout' })).getByText('not verified')
+  expect(within(shared).queryByText('not verified')).toBeNull()
+  await userEvent.click(within(shared).getByRole('button', { name: 'Use as comment' }))
+  await waitFor(() => expect(drafts()).toEqual([expect.objectContaining({ path: 'api.ts', line: 2, side: 'RIGHT', body: 'Could this use the shared client?' })]))
+  await waitFor(() => expect(stateCalls).toEqual([expect.objectContaining({ headSha: 'HEAD1', findingId: 'f2', state: 'posted' })]))
+})
+
+test('dismiss folds the finding away', async () => {
+  const { stateCalls } = renderPage({ opinion: { cached: opinion } })
+  await openDecisionOne()
+  await userEvent.click(within(screen.getByRole('region', { name: 'Name the timeout' })).getByRole('button', { name: 'Dismiss' }))
+  expect(await screen.findByText('1 dismissed', {}, { timeout: 3000 })).toBeInTheDocument()
+  expect(screen.queryByRole('region', { name: 'Name the timeout' })).toBeNull()
+  expect(stateCalls).toEqual([expect.objectContaining({ findingId: 'f1', state: 'dismissed' })])
+})
+
+test('dig deeper replaces the findings', async () => {
+  const gate = Effect.runSync(Deferred.make<void>())
+  const deep: DecisionOpinion = { ...decisionOpinion('one', [finding({ id: 'd1', decisionId: 'one', severity: 'blocks', title: 'Races the save' })]), deep: true }
+  renderPage({
+    opinion: { cached: opinion },
+    deeper: () =>
+      Stream.make({ _tag: 'Running', startedAt: new Date().toISOString(), step: 'Reading the callers' } as DeeperEvent).pipe(
+        Stream.concat(Stream.fromEffect(Effect.as(Deferred.await(gate), { _tag: 'Done', opinion: deep } as DeeperEvent))),
+      ),
+  })
+  await openDecisionOne()
+  await userEvent.click(screen.getByRole('button', { name: 'Dig deeper' }))
+  expect(await screen.findByText('Reading the callers', {}, { timeout: 3000 })).toBeInTheDocument()
+  act(() => Effect.runSync(Deferred.succeed(gate, undefined)))
+  expect(await screen.findByRole('region', { name: 'Races the save' }, { timeout: 3000 })).toBeInTheDocument()
+  expect(screen.getByText('Deeper look')).toBeInTheDocument()
+  expect(screen.queryByRole('region', { name: 'Use the shared client' })).toBeNull()
+  expect(screen.queryByRole('button', { name: 'Dig deeper' })).toBeNull()
+})
+
+test('stack moved line offers a re-run', async () => {
+  const entry = (number: number, baseRef: string, headRef: string, headSha: string) => ({ number, title: `#${number}`, baseRef, headRef, headSha })
+  const { opinionRuns } = renderPage({
+    getPr: () => Effect.succeed({ ...pr, stack: [entry(7, 'master', 'h', 'HEAD1'), entry(8, 'h', 'h2', 'NEW')] }),
+    opinion: { cached: { ...opinion, stackHeads: { '8': 'OLD' } }, run: opinion },
+  })
+  expect(await screen.findByText('The stack moved since this opinion.', {}, { timeout: 3000 })).toBeInTheDocument()
+  expect(opinionRuns).not.toContain(true)
+  await userEvent.click(screen.getByRole('button', { name: 'Run again' }))
+  await waitFor(() => expect(opinionRuns).toContain(true))
+  await waitFor(() => expect(screen.queryByText('The stack moved since this opinion.')).toBeNull())
+  expect(opinionRuns.filter((r) => r)).toEqual([true])
 })

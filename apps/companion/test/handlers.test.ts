@@ -168,11 +168,17 @@ describe('handlers', () => {
       assert.isTrue(kinds.lastIndexOf('sort') < kinds.indexOf('stack-opinion'))
     }).pipe(Effect.scoped))
 
-  it.live('no PR opinion runs from the stack view', () =>
+  it.live('the stack view judges the bottom PR only', () =>
     Effect.gen(function* () {
-      const { agent, client } = setup()
-      yield* Stream.runCollect((yield* client).Stack({ ref }))
-      assert.strictEqual(opinionCalls(agent.calls), 0)
+      const sort = { decisions: [d1], skim: [], claims: [] }
+      const { agent, client } = setup({
+        files: [{ path: 'src/a.ts', additions: 300, deletions: 0 }],
+        sorts: [sort, sort],
+        github: { listOpenPrs: () => Effect.succeed([entry(7, 'master', 'feat'), entry(8, 'feat', 'feat2')]) },
+      })
+      yield* Stream.runCollect((yield* client).Stack({ ref: { ...ref, number: 8 } }))
+      yield* Effect.sleep('50 millis')
+      assert.deepStrictEqual(agent.calls.filter((x) => x.log.kind === 'opinion').map((x) => x.log.number), [7])
     }).pipe(Effect.scoped))
 
   it.live('Stack ends with why the overview failed, so the page stops waiting for it', () =>
@@ -221,6 +227,33 @@ describe('handlers', () => {
       yield* c.SetDrafts({ ref, drafts: [draft] })
       assert.instanceOf(yield* Effect.flip(c.SubmitReview({ ref, event: 'COMMENT', body: '', commitId: 'HEAD1' })), ReviewRejected)
       assert.deepStrictEqual(yield* c.GetDrafts({ ref }), [draft])
+    }).pipe(Effect.scoped))
+
+  // The fake PR's head is HEAD1; the page still showed OLD, where src/a.ts lacked its first line.
+  const pushed = (from: string) => (from === 'OLD' ? 'diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -0,0 +1 @@\n+top\n@@ -5 +6 @@\n-five\n+five\n+more\n' : '')
+
+  it.effect('a review sent after a push moves its comments with the code and goes on the new head', () =>
+    Effect.gen(function* () {
+      const sent: unknown[] = []
+      const c = yield* setup({ git: fakeGit({ diff: pushed }), github: { submitReview: (_o, _r, _n, r) => Effect.sync(() => void sent.push(r)) } }).client
+      const old = { id: 'd1', path: 'src/a.ts', line: 2, side: 'RIGHT' as const, body: 'Use the helper' }
+      const fresh = { id: 'd2', path: 'src/a.ts', line: 2, side: 'RIGHT' as const, body: 'Written on the new head', headSha: 'HEAD1' }
+      yield* c.SetDrafts({ ref, drafts: [old, fresh] })
+      yield* c.SubmitReview({ ref, event: 'COMMENT', body: '', commitId: 'OLD' })
+      assert.deepStrictEqual(sent, [{ event: 'COMMENT', body: '', commitId: 'HEAD1', comments: [{ ...old, line: 3, headSha: 'HEAD1' }, fresh] }])
+    }).pipe(Effect.scoped))
+
+  it.effect('a comment whose line a push rewrote stops the review, naming it, and every draft is kept', () =>
+    Effect.gen(function* () {
+      const sent: unknown[] = []
+      const c = yield* setup({ git: fakeGit({ diff: pushed }), github: { submitReview: (_o, _r, _n, r) => Effect.sync(() => void sent.push(r)) } }).client
+      const drafts = [{ id: 'd1', path: 'src/a.ts', line: 5, side: 'RIGHT' as const, body: 'On five', headSha: 'OLD' }]
+      yield* c.SetDrafts({ ref, drafts })
+      const e = yield* Effect.flip(c.SubmitReview({ ref, event: 'COMMENT', body: '', commitId: 'HEAD1' }))
+      assert.instanceOf(e, ReviewRejected)
+      assert.include(e.message, 'src/a.ts:5')
+      assert.deepStrictEqual(sent, [])
+      assert.deepStrictEqual(yield* c.GetDrafts({ ref }), drafts)
     }).pipe(Effect.scoped))
 
   it.effect('Ask follow-up resumes the stored session', () =>
@@ -440,6 +473,14 @@ describe('handlers', () => {
       assert.deepStrictEqual(agent.calls.map((x) => x.log.kind), ['sort', 'opinion'])
       // A fully prepared head answers at once.
       assert.deepStrictEqual(tags(yield* Stream.runCollect(c.Review({ ref, headSha: 'HEAD1' }))), ['Done'])
+    }).pipe(Effect.scoped))
+
+  it.live('opening a stacked PR prepares the one right above it, not further up', () =>
+    Effect.gen(function* () {
+      const { agent, client } = setup({ files: [{ path: 'src/a.ts', additions: 300, deletions: 0 }], github: { listOpenPrs: () => Effect.succeed([entry(7, 'master', 'feat'), entry(8, 'feat', 'feat2'), entry(9, 'feat2', 'feat3')]) } })
+      yield* Stream.runCollect((yield* client).Review({ ref, headSha: 'HEAD1' }))
+      yield* Effect.sleep('50 millis')
+      assert.deepStrictEqual(agent.calls.map((x) => x.log.number), [7, 8])
     }).pipe(Effect.scoped))
 
   it.live('Prepare ignores PRs the viewer is not asked to review', () =>

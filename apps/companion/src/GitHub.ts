@@ -191,7 +191,7 @@ export const makeClient = Effect.fnUntraced(function* (octokit: Octokit) {
         }),
       ).pipe(
         // 422 usually means a commented line is no longer in the PR.
-        Effect.mapError((e) => (e.status === 422 ? new ReviewRejected({ message: e.message }) : e)),
+        Effect.mapError((e) => (e.status === 422 ? new ReviewRejected({ message: `GitHub refused the review: ${e.message}. A commented line may be gone from the PR` }) : e)),
         Effect.andThen(listThreads.invalidate(owner, repo, n)),
       ),
   } satisfies GitHubClient

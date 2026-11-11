@@ -63,6 +63,8 @@ export const Draft = Schema.Struct({
   startLine: Schema.optionalKey(Schema.Number),
   side: Side,
   body: Schema.String,
+  /** The head its lines belong to, so a submit after a push can move them. Older drafts lack it. */
+  headSha: Schema.optionalKey(Schema.String),
 })
 export type Draft = typeof Draft.Type
 

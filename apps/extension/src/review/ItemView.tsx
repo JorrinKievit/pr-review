@@ -182,6 +182,7 @@ export function ItemView(props: {
             line: firstRange?.end ?? 1,
             ...(firstRange && firstRange.start !== firstRange.end ? { startLine: firstRange.start } : {}),
             side: 'RIGHT',
+            headSha: pr.headSha,
           }}
           onDone={() => props.onCommentDone?.()}
         />

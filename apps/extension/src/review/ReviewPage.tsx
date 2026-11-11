@@ -2,7 +2,7 @@ import { RegistryContext, useAtomSet, useAtomValue } from '@effect/atom-react'
 import type { DecisionState, DecisionStates, OpinionEvent, PrRef, PrView, ReviewEvent } from '@pr-review/domain'
 import { useHotkeys } from '@tanstack/react-hotkeys'
 import { AsyncResult } from 'effect/reactivity'
-import { useContext, useMemo, useState } from 'react'
+import { useContext, useEffect, useMemo, useState } from 'react'
 import { useAtoms } from '../atoms.ts'
 import { useRemembered } from '../remembered.ts'
 import { failureOf, isUnavailable } from '../result.ts'
@@ -17,7 +17,14 @@ import { buildItems, isOpen, itemId, nextOpen, stackMoved, startAt } from './ite
 import { ItemView } from './ItemView.tsx'
 import { Preparing } from './Preparing.tsx'
 
-export function ReviewPage({ prRef }: { prRef: PrRef }) {
+/** What the stack view passes when it shows a PR's review inside it. */
+type Embed = {
+  /** The item to open on, such as `d:<decision id>` from a finding. */
+  focus?: string | undefined
+  onProgress?: ((decided: number, total: number) => void) | undefined
+}
+
+export function ReviewPage({ prRef, ...embed }: { prRef: PrRef } & Embed) {
   const { prAtom } = useAtoms()
   const pr = useAtomValue(prAtom(prRef))
   const error = failureOf(pr)
@@ -35,26 +42,26 @@ export function ReviewPage({ prRef }: { prRef: PrRef }) {
         <Spinner /> Fetching #{prRef.number}…
       </main>
     )
-  return <Loaded prRef={prRef} pr={pr.value} />
+  return <Loaded prRef={prRef} pr={pr.value} {...embed} />
 }
 
 type ReviewDone = Extract<ReviewEvent, { _tag: 'Done' }>
 
 /** Waits once behind the progress screen, then shows the review from the latest `Done`; a refresh keeps it up until the next one. */
-function Loaded({ prRef, pr }: { prRef: PrRef; pr: PrView }) {
+function Loaded({ prRef, pr, ...embed }: { prRef: PrRef; pr: PrView } & Embed) {
   const atom = useAtoms().reviewAtom(prRef, pr.headSha)
   const result = useAtomValue(atom)
   const event = AsyncResult.isSuccess(result) ? result.value : undefined
   const [shown, setShown] = useState<ReviewDone>()
   if (event?._tag === 'Done' && event !== shown) setShown(event)
   const review = event?._tag === 'Done' ? event : shown
-  if (review) return <Ready prRef={prRef} pr={pr} review={review} />
-  if (AsyncResult.isFailure(result)) return <Ready prRef={prRef} pr={pr} sortError={String((failureOf(result) as { message?: string } | undefined)?.message ?? 'unknown error')} />
+  if (review) return <Ready prRef={prRef} pr={pr} review={review} {...embed} />
+  if (AsyncResult.isFailure(result)) return <Ready prRef={prRef} pr={pr} {...embed} sortError={String((failureOf(result) as { message?: string } | undefined)?.message ?? 'unknown error')} />
   return <Preparing pr={pr} phases={event?._tag === 'Preparing' ? event.phases : []} />
 }
 
 /** The review, built once per `Done`: its order holds while the page is open. Without one (the sort failed) every file is unsorted. */
-function Ready({ prRef, pr, review, sortError }: { prRef: PrRef; pr: PrView; review?: ReviewDone; sortError?: string }) {
+function Ready({ prRef, pr, review, sortError, focus, onProgress }: { prRef: PrRef; pr: PrView; review?: ReviewDone; sortError?: string } & Embed) {
   const { reviewAtom, stateAtom, opinionAtom } = useAtoms()
   const registry = useContext(RegistryContext)
   const refreshReview = () => registry.refresh(reviewAtom(prRef, pr.headSha))
@@ -72,6 +79,9 @@ function Ready({ prRef, pr, review, sortError }: { prRef: PrRef; pr: PrView; rev
   const openFindings = done ? done.opinion.decisions.flatMap((d) => d.findings).filter((f) => isOpen(f, done.states)) : []
 
   const [selectedKey, setSelectedKey] = useRemembered<string | undefined>(`at:${prRef.host}/${prRef.owner}/${prRef.repo}#${prRef.number}`, undefined)
+  useEffect(() => {
+    if (focus && items.some((i) => i.key === focus)) setSelectedKey(focus)
+  }, [focus])
   const [overrides, setOverrides] = useState<Record<string, DecisionState | null>>({})
   const [commentingOn, setCommentingOn] = useState<string>()
   const [chatOpen, setChatOpen] = useState(false)
@@ -141,6 +151,7 @@ function Ready({ prRef, pr, review, sortError }: { prRef: PrRef; pr: PrView; rev
 
   const reviewable = items.flatMap((i) => itemId(i) ?? [])
   const decided = reviewable.filter((i) => states[i]).length
+  useEffect(() => onProgress?.(decided, reviewable.length), [decided, reviewable.length])
 
   return (
     <div className="flex h-full flex-col">

@@ -62,11 +62,11 @@ const quickAnswer = (call: AgentCall): AgentQuick => ({ summary: 'Adds a thing.'
 const quickSetup = (stats: FileStat[]) => setup({ stats, sort: (call) => (call.prompt.includes('This PR is small') ? Effect.succeed(quickAnswer(call)) : Effect.succeed(sortOf(few))) })
 
 describe('Reviewer', () => {
-  it.effect('a 120-line PR takes the quick path in one turn', () =>
+  it.effect('a 120-line PR takes the quick path in one turn, on the fast model', () =>
     Effect.gen(function* () {
       const { agent, layer } = quickSetup([stat('src/a.ts', 100, 5), stat('src/b.ts', 15)])
       const r = yield* review.pipe(Effect.provide(layer))
-      assert.deepStrictEqual(turns(agent.calls), ['1/fake/0/main/sort'])
+      assert.deepStrictEqual(turns(agent.calls), ['1/fake/0/fast/sort'])
       assert.isTrue(r.sort.quick)
       assert.match(agent.calls[0]!.prompt, /THE DIFF/)
     }))

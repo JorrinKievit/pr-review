@@ -111,7 +111,7 @@ function FindingCard(props: { prRef: PrRef; headSha: string; finding: Finding; s
   const [ruling, setRuling] = useState(false)
   const post = () => {
     if (!f.anchor || !f.comment) return
-    add({ path: f.anchor.path, line: f.anchor.line, side: 'RIGHT', body: f.comment })
+    add({ path: f.anchor.path, line: f.anchor.line, side: 'RIGHT', body: f.comment, headSha: props.headSha })
     setState(f.id, 'posted')
   }
   return (

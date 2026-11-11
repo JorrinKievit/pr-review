@@ -1,4 +1,4 @@
-import { AgentError, AgentRule, appendPatch, inGuidance, opinionsMode, ruleBranch, ruleTitle, type DecisionState, type DeeperEvent, type DecisionOpinion, type DecisionStates, type Draft, type FindingStates, type OpinionEvent, type PrOpinion, type PrRef, type Rereview, type ReviewEvent, ReviewRpcs, type SortResult, type SortEvent, type StackEntry, type StackEntryStatus, type StackEvent, type StackOpinion, type StackOpinionEvent, targetKey } from '@pr-review/domain'
+import { AgentError, AgentRule, appendPatch, inGuidance, opinionsMode, ruleBranch, ruleTitle, type DecisionState, type DeeperEvent, type DecisionOpinion, type DecisionStates, type Draft, type FindingStates, type OpinionEvent, type PrOpinion, type PrRef, type Rereview, type ReviewEvent, ReviewRejected, ReviewRpcs, type SortResult, type SortEvent, type StackEntry, type StackEntryStatus, type StackEvent, type StackOpinion, type StackOpinionEvent, targetKey } from '@pr-review/domain'
 import { readFileSync } from 'node:fs'
 import { Cause, Clock, Effect, Exit, Fiber, Layer, Option, Queue, type Scope, Stream } from 'effect'
 import { RpcMiddleware } from 'effect/rpc'
@@ -8,7 +8,7 @@ import { Agent } from './Agent.ts'
 import { Config } from './Config.ts'
 import { Git } from './Git.ts'
 import { GitHub } from './GitHub.ts'
-import { sameChange } from './interdiff.ts'
+import { moveLine, sameChange } from './interdiff.ts'
 import { Opiner } from './Opiner.ts'
 import { guidanceSection } from './opinionContext.ts'
 import { Overview } from './Overview.ts'
@@ -220,6 +220,48 @@ export const HandlersLive = ReviewRpcs.toLayer(
       return { gh, defaultBranch, stack: buildStack([...prs], ref.number, defaultBranch) }
     })
 
+    /**
+     * The drafts placed on the PR's current head. A draft written on an earlier head (its own, or the page's for older
+     * drafts) moves with the code; left-side lines move between the two merge bases. Fails naming those that can't.
+     */
+    const draftsAtHead = Effect.fnUntraced(function* (ref: PrRef, pageHead: string, head: { headSha: string; mergeBase: string }) {
+      const repoKey = repoKeyOf(ref)
+      const placed: Draft[] = []
+      const lost: Draft[] = []
+      for (const d of yield* draftsFor(ref)) {
+        const from = d.headSha ?? pageHead
+        if (from === head.headSha) {
+          placed.push(d)
+          continue
+        }
+        const moved = yield* Effect.gen(function* () {
+          const [a, b] = d.side === 'RIGHT' ? [from, head.headSha] : [(yield* sorter.cached(ref, from))?.mergeBase, head.mergeBase]
+          if (!a) return undefined
+          const patch = yield* git.diff(repoKey, a, b, [d.path])
+          const end = moveLine(patch, d.path, d.line)
+          const start = d.startLine === undefined ? undefined : moveLine(patch, d.path, d.startLine)
+          if (!end || (d.startLine !== undefined && !start)) return undefined
+          return { ...d, path: end.path, line: end.line, ...(start ? { startLine: start.line } : {}), headSha: head.headSha }
+        }).pipe(Effect.orElseSucceed(() => undefined))
+        if (moved) placed.push(moved)
+        else lost.push(d)
+      }
+      if (lost.length)
+        return yield* new ReviewRejected({
+          message: `The PR was pushed to since you wrote ${lost.length === 1 ? 'this comment' : 'these comments'}, and the ${lost.length === 1 ? 'line is' : 'lines are'} gone: ${lost.map((d) => `${d.path}:${d.line}`).join(', ')}. Reload the page, then move or delete ${lost.length === 1 ? 'it' : 'them'}`,
+        })
+      return placed
+    })
+
+    /** The PR stacked right on top of this one gets its review prepared, so it's ready when the reviewer moves up. */
+    const prepareAbove = (ref: PrRef) =>
+      Effect.gen(function* () {
+        const { stack } = yield* openStack(ref)
+        const self = stack.find((p) => p.number === ref.number)
+        const above = self && stack.find((p) => p.baseRef === self.headRef)
+        if (above) yield* reviewer.prepare({ ...ref, number: above.number }, above.headSha)
+      }).pipe(Effect.catch((e) => Effect.logDebug(e)))
+
     return {
       Health: () => Effect.succeed({ version: VERSION }),
 
@@ -265,6 +307,8 @@ export const HandlersLive = ReviewRpcs.toLayer(
             yield* config.repo(repoKeyOf(ref))
             yield* reviewer.prepare(ref, headSha)
             const { fiber, cached } = yield* startIn(scope, reviewer.result(ref, headSha))
+            // After this PR's run, so it never waits on the one above for an agent slot.
+            yield* Effect.forkIn(Effect.andThen(Fiber.await(fiber), prepareAbove(ref)), scope)
             const end = Stream.fromEffect(
               Effect.gen(function* () {
                 const r = yield* Fiber.join(fiber)
@@ -371,6 +415,9 @@ export const HandlersLive = ReviewRpcs.toLayer(
         Stream.callback<StackEvent, Effect.Error<ReturnType<typeof openStack>>>((queue) =>
           Effect.gen(function* () {
             const { stack } = yield* openStack(ref)
+            // The bottom PR is where the reviewer starts; opening each PR then prepares the one above it.
+            const bottom = stack[0]
+            if (bottom) yield* reviewer.prepare({ ...ref, number: bottom.number }, bottom.headSha)
             const entries: StackEntryStatus[] = yield* Effect.forEach(stack, (pr) =>
               Effect.gen(function* () {
                 const prRef = { ...ref, number: pr.number }
@@ -458,7 +505,10 @@ export const HandlersLive = ReviewRpcs.toLayer(
       SubmitReview: ({ ref, event, body, commitId }) =>
         Effect.gen(function* () {
           const gh = yield* github.forHost(ref.host)
-          yield* gh.submitReview(ref.owner, ref.repo, ref.number, { event, body, commitId, comments: yield* draftsFor(ref) })
+          const pr = yield* gh.getPr(ref.owner, ref.repo, ref.number)
+          const head = yield* git.fetchPr(repoKeyOf(ref), ref.number, pr.baseRef, pr.headSha)
+          const comments = yield* draftsAtHead(ref, commitId, head)
+          yield* gh.submitReview(ref.owner, ref.repo, ref.number, { event, body, commitId: head.headSha, comments })
           yield* Effect.orDie(store.drafts.set(prKey(ref), []))
         }),
     }

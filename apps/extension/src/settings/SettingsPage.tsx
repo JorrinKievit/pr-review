@@ -90,7 +90,7 @@ function AccountCard(props: { account: AgentAccount; status: AccountStatus | und
           <Field label="Model" hint="Agent default if empty">
             <Input className="font-mono text-sm" value={a.model ?? ''} onChange={(e) => setOptional('model', e.target.value)} />
           </Field>
-          <Field label="Fast model" hint="For low-impact decisions and ticket reads">
+          <Field label="Fast model" hint="For small PRs, low-impact decisions and ticket reads">
             <Input className="font-mono text-sm" value={a.fastModel ?? ''} onChange={(e) => setOptional('fastModel', e.target.value)} />
           </Field>
           <Field label="At once">

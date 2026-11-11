@@ -13,7 +13,7 @@ type Lines = Extract<AskTarget, { _tag: 'Lines' }>
 export type Mode = 'ask' | 'comment'
 
 const span = (t: { start: number; end: number }) => (t.start === t.end ? `line ${t.end}` : `lines ${t.start}–${t.end}`)
-const draftTarget = (t: Lines): Omit<Draft, 'id' | 'body'> => ({ path: t.path, line: t.end, ...(t.start !== t.end ? { startLine: t.start } : {}), side: t.side })
+const draftTarget = (t: Lines, headSha: string): Omit<Draft, 'id' | 'body'> => ({ path: t.path, line: t.end, ...(t.start !== t.end ? { startLine: t.start } : {}), side: t.side, headSha })
 
 const box = 'mx-2.5 my-1.5 rounded-lg border border-border bg-card px-3 py-2 font-sans text-base whitespace-normal'
 
@@ -82,7 +82,7 @@ export function LineThread(props: { prRef: PrRef; headSha: string; target: Lines
         <CommentBox
           key={commenting}
           prRef={props.prRef}
-          target={draftTarget(props.target)}
+          target={draftTarget(props.target, props.headSha)}
           {...(commenting !== undefined ? { initial: commenting } : {})}
           onDone={() => {
             setCommenting(undefined)

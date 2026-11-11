@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { assert, describe, it } from '@effect/vitest'
-import { CompanionUnavailable, defaultSettings, ReviewRpcs, type Settings } from '@pr-review/domain'
+import { type AccountStatus, CompanionUnavailable, defaultSettings, ReviewRpcs, type Settings } from '@pr-review/domain'
 import { makePortClient, memoryHub, type PortLike } from '@pr-review/native-messaging'
 import { Effect, Exit, Fiber, Layer, Scope, Stream } from 'effect'
 import { TestClock } from 'effect/testing'
@@ -10,13 +10,16 @@ import { fakeCompanion } from './companion.ts'
 const ref = { host: 'h', owner: 'o', repo: 'r', number: 7 }
 const flush = Effect.promise(() => new Promise((r) => setTimeout(r, 50)))
 
-const setup = (o: { onSortEnd?: () => void; settings?: Settings; configured?: Settings[]; version?: string; companionVersion?: string } = {}) =>
+const setup = (
+  o: { onSortEnd?: () => void; settings?: Settings; configured?: Settings[]; version?: string; companionVersion?: string; poolStatus?: () => Effect.Effect<ReadonlyArray<AccountStatus>> } = {},
+) =>
   Effect.gen(function* () {
     const companion = fakeCompanion({
       ...o,
       handlers: {
         Configure: ({ settings }) => Effect.sync(() => void o.configured?.push(settings)),
         ...(o.companionVersion ? { Health: () => Effect.succeed({ version: o.companionVersion! }) } : {}),
+        ...(o.poolStatus ? { PoolStatus: o.poolStatus } : {}),
       },
     })
     yield* Layer.build(companion.server)
@@ -124,6 +127,23 @@ describe('relay', () => {
       const again = yield* page
       yield* again.client.Health()
       assert.strictEqual(native.opened, 2)
+    }).pipe(Effect.scoped))
+
+  it.effect('keeps native open past the idle time while an agent run is going', () =>
+    Effect.gen(function* () {
+      let busy = 1
+      const { native, page } = yield* setup({ poolStatus: () => Effect.sync(() => [{ id: 'a', busy, until: 0, error: null }]) })
+      const p = yield* page
+      yield* p.client.Health()
+      yield* p.close
+      yield* flush
+      yield* TestClock.adjust('5 minutes')
+      yield* flush
+      assert.strictEqual(native.closed, 0)
+      busy = 0
+      yield* TestClock.adjust('5 minutes')
+      yield* flush
+      assert.strictEqual(native.closed, 1)
     }).pipe(Effect.scoped))
 
   /** A relay with prepares; `started` is what the companion answers to Prepare. */

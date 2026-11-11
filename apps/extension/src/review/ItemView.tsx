@@ -1,10 +1,10 @@
 import type { Decision, DecisionState, FindingStates, PrOpinion, PrRef, PrView, Rereview } from '@pr-review/domain'
 import { useState } from 'react'
 import { Streamdown } from 'streamdown'
-import { Button, Kbd, Pill, Working } from '../ui/index.tsx'
+import { Button, Kbd, Pill } from '../ui/index.tsx'
 import { CommentBox } from './CommentBox.tsx'
 import { Description } from './Description.tsx'
-import { DecisionFindings, FindingsList } from './Findings.tsx'
+import { DecisionFindings, VerdictPill } from './Findings.tsx'
 import { FileDiffView } from './FileDiffView.tsx'
 import { type Item, itemFiles, itemTitle, linesIn } from './items.ts'
 
@@ -78,13 +78,8 @@ export function ItemView(props: {
   onDiscuss?: () => void
   onCommentDone?: () => void
   onNext?: () => void
-  /** The running sort, while the item is still the unsorted list. */
-  sorting?: { startedAt: string; step?: string }
   /** Claude's finished opinion on the PR, with what the reviewer did with each finding. */
   opinion?: { opinion: PrOpinion; states: FindingStates } | undefined
-  /** Decision titles by id, for the findings list. */
-  titles?: Readonly<Record<string, string>>
-  onOpenDecision?: (decisionId: string) => void
 }) {
   const { item, pr } = props
   // Sorts from before renames were detected list a moved file under both paths.
@@ -101,6 +96,8 @@ export function ItemView(props: {
   const toggle = (path: string) => setCollapsed((c) => (c.has(path) ? new Set([...c].filter((p) => p !== path)) : new Set([...c, path])))
   const first = item.kind === 'decision' ? item.decision.files[0] : undefined
   const firstRange = first?.ranges[0]
+  const opinionId = item.kind === 'decision' ? item.decision.id : item.kind === 'skim' ? item.opinionId : undefined
+  const take = opinionId === undefined ? undefined : props.opinion?.opinion.decisions.find((d) => d.decisionId === opinionId)
 
   return (
     <article className="mx-auto max-w-[60rem] px-5 py-4">
@@ -109,11 +106,12 @@ export function ItemView(props: {
         {item.kind === 'decision' && (
           <>
             <Pill>{lensLabel[item.decision.lens]}</Pill>
-            <Pill className={item.decision.reason === 'departs' || item.decision.reason === 'duplicate' ? 'text-destructive' : ''}>{reasonLabel[item.decision.reason]}</Pill>
+            <Pill>{reasonLabel[item.decision.reason]}</Pill>
             {item.unclaimed && <Pill className="text-warn">Not in the author's list</Pill>}
           </>
         )}
-        {item.kind !== 'description' && item.kind !== 'findings' && (
+        {take && props.opinion && <VerdictPill opinion={take} states={props.opinion.states} />}
+        {item.kind !== 'description' && (
           <span>
             {files.length} {files.length === 1 ? 'file' : 'files'} · {linesIn(pr.files, files)} lines
           </span>
@@ -168,35 +166,12 @@ export function ItemView(props: {
           )}
         </div>
       )}
-      {item.kind === 'decision' && props.opinion && (
-        <DecisionFindings
-          prRef={props.prRef}
-          headSha={pr.headSha}
-          prNumber={pr.number}
-          decisionId={item.decision.id}
-          opinion={props.opinion.opinion.decisions.find((d) => d.decisionId === item.decision.id)}
-          states={props.opinion.states}
-        />
-      )}
-      {item.kind === 'findings' && props.opinion?.opinion.ticketNote && <p className="mb-2 text-sm text-dim">Ticket: {props.opinion.opinion.ticketNote}</p>}
-      {item.kind === 'findings' && props.opinion && (
-        <FindingsList
-          findings={props.opinion.opinion.decisions.flatMap((d) => d.findings)}
-          states={props.opinion.states}
-          prNumber={pr.number}
-          titles={props.titles ?? {}}
-          onOpen={(id) => props.onOpenDecision?.(id)}
-        />
-      )}
       {item.kind === 'skim' && <p className="mb-3 text-muted-foreground">{item.area.summary}</p>}
+      {opinionId !== undefined && props.opinion && (
+        <DecisionFindings prRef={props.prRef} headSha={pr.headSha} prNumber={pr.number} decisionId={opinionId} opinion={take} states={props.opinion.states} />
+      )}
       {item.kind === 'trusted' && <p className="mb-3 text-muted-foreground">{item.group.why}</p>}
       {item.kind === 'description' && <Description prRef={props.prRef} />}
-      {item.kind === 'unsorted' && (
-        <div className="mb-3 flex flex-col gap-1.5">
-          <p className="text-muted-foreground">Claude is sorting this PR. Files show here until it is done.</p>
-          {props.sorting && <Working step={props.sorting.step} startedAt={props.sorting.startedAt} />}
-        </div>
-      )}
 
       {props.commenting && first && (
         <CommentBox
@@ -232,7 +207,7 @@ export function ItemView(props: {
       </div>
       <ActionBar
         onNext={props.onNext}
-        {...(item.kind !== 'unsorted' && item.kind !== 'findings' && props.onAccept ? { verdict: props.verdict, was: changed?.was, onAccept: props.onAccept } : {})}
+        {...(item.kind !== 'unsorted' && props.onAccept ? { verdict: props.verdict, was: changed?.was, onAccept: props.onAccept } : {})}
         {...(item.kind === 'decision' ? { onPushBack: props.onPushBack, onDiscuss: props.onDiscuss } : {})}
       />
     </article>

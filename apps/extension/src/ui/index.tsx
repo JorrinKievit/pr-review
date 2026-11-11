@@ -32,23 +32,30 @@ export function Dot({ tone, className }: { tone: DotTone; className?: string }) 
   return <span aria-hidden className={cn('inline-block size-2 shrink-0 rounded-full border-[1.5px]', dots[tone], className)} />
 }
 
-/** A running job: spinner, what it is doing now and, given a start time, how long it has been going. */
-export function Working({ step, startedAt, className }: { step?: string | undefined; startedAt?: string | undefined; className?: string }) {
+/** The time now, ticking once a second. */
+export function useNow() {
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 1000)
     return () => clearInterval(timer)
   }, [])
-  const secs = startedAt ? Math.max(0, Math.floor((now - Date.parse(startedAt)) / 1000)) : undefined
+  return now
+}
+
+/** Milliseconds as m:ss. */
+export const clock = (ms: number) => {
+  const secs = Math.max(0, Math.floor(ms / 1000))
+  return `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`
+}
+
+/** A running job: spinner, what it is doing now and, given a start time, how long it has been going. */
+export function Working({ step, startedAt, className }: { step?: string | undefined; startedAt?: string | undefined; className?: string }) {
+  const now = useNow()
   return (
     <span className={cn('flex min-w-0 items-center gap-2 text-muted-foreground', className)}>
       <Spinner className="size-3 shrink-0" />
       <span className="min-w-0 truncate">{step ?? 'Starting'}</span>
-      {secs !== undefined && (
-        <span className="shrink-0 text-dim tabular-nums">
-          {Math.floor(secs / 60)}:{String(secs % 60).padStart(2, '0')}
-        </span>
-      )}
+      {startedAt && <span className="shrink-0 text-dim tabular-nums">{clock(now - Date.parse(startedAt))}</span>}
     </span>
   )
 }

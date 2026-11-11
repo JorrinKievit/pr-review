@@ -1,4 +1,4 @@
-import { ReviewRpcs, type SortEvent } from '@pr-review/domain'
+import { type ReviewEvent, ReviewRpcs, type SortEvent } from '@pr-review/domain'
 import { memoryHub, portClientProtocol, portServer } from '@pr-review/native-messaging'
 import { Effect, Layer, Stream } from 'effect'
 import { RpcSerialization } from 'effect/rpc'
@@ -10,17 +10,18 @@ const unused = () => Effect.die('unused')
 /** What Remember saved, shared by every fake companion so a test can leave a page and come back. */
 export const remembered = new Map<string, string>()
 
-/** A fake companion behind a memory hub. Defaults: Health, GetFilePatch echoes the path, Sort emits `sortEvents` 20 ms apart then stays open. */
-export const fakeCompanion = (o: { sortEvents?: ReadonlyArray<SortEvent>; onSortEnd?: () => void; handlers?: Partial<Handlers> } = {}) => {
+const spaced = <A>(events: ReadonlyArray<A> | undefined) => Stream.concat(Stream.fromIterable(events ?? []).pipe(Stream.mapEffect((e) => Effect.as(Effect.sleep(20), e))), Stream.never)
+
+/** A fake companion behind a memory hub. Defaults: Health, GetFilePatch echoes the path, Sort and Review emit their events 20 ms apart then stay open. */
+export const fakeCompanion = (
+  o: { sortEvents?: ReadonlyArray<SortEvent>; reviewEvents?: ReadonlyArray<ReviewEvent>; onSortEnd?: () => void; handlers?: Partial<Handlers> } = {},
+) => {
   const hub = memoryHub()
   const handlers = ReviewRpcs.toLayer({
     Health: () => Effect.succeed({ version: '0.0.0' }),
     GetFilePatch: ({ path }) => Effect.succeed(`patch of ${path}`),
-    Sort: () =>
-      Stream.concat(Stream.fromIterable(o.sortEvents ?? []).pipe(Stream.mapEffect((e) => Effect.as(Effect.sleep(20), e))), Stream.never).pipe(
-        Stream.ensuring(Effect.sync(() => o.onSortEnd?.())),
-      ),
-    Review: () => Stream.never,
+    Sort: () => spaced(o.sortEvents).pipe(Stream.ensuring(Effect.sync(() => o.onSortEnd?.()))),
+    Review: () => spaced(o.reviewEvents),
     Prepare: () => Effect.void,
     GetPr: unused,
     SetState: unused,

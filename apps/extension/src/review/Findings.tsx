@@ -4,50 +4,24 @@ import { AsyncResult } from 'effect/reactivity'
 import { useState } from 'react'
 import { toast } from 'sonner'
 import { useAtoms } from '../atoms.ts'
-import { cn } from '../lib/utils.ts'
 import { failureOf } from '../result.ts'
 import { Button, Pill, Working } from '../ui/index.tsx'
 import { useDrafts } from './drafts.ts'
+import { worstSeverity } from './items.ts'
 import { RuleDialog } from './RuleDialog.tsx'
 
-export const severityLabel: Record<Severity, string> = { blocks: 'Blocks merge', should: 'Should fix', ask: 'Worth asking' }
+const severityLabel: Record<Severity, string> = { blocks: 'Blocks merge', should: 'Should fix', ask: 'Worth asking' }
 const severityShort: Record<Severity, string> = { blocks: 'Blocks', should: 'Should fix', ask: 'Ask' }
-export const severityTone: Record<Severity, string> = { blocks: 'border-destructive/40 text-destructive', should: 'border-warn/40 text-warn', ask: 'border-info/40 text-info' }
+const severityTone: Record<Severity, string> = { blocks: 'border-destructive/40 text-destructive', should: 'border-warn/40 text-warn', ask: 'border-info/40 text-info' }
 
 export const SeverityPill = ({ severity, short }: { severity: Severity; short?: boolean }) => (
   <Pill className={severityTone[severity]}>{(short ? severityShort : severityLabel)[severity]}</Pill>
 )
 
-/** Neither posted nor dismissed, and not already handled higher in the stack. */
-export const isOpen = (f: Finding, states: FindingStates) => !states[f.id] && f.handledIn === null
-
-/** Every finding on the PR, worst first; a row opens its decision. */
-export function FindingsList(props: { findings: ReadonlyArray<Finding>; states: FindingStates; prNumber: number; titles: Readonly<Record<string, string>>; onOpen: (decisionId: string) => void }) {
-  const rows = rankFindings(
-    props.findings.filter((f) => props.states[f.id] !== 'dismissed'),
-    [props.prNumber],
-  )
-  return (
-    <ul aria-label="Findings" className="flex flex-col gap-1">
-      {rows.map((f) => (
-        <li key={f.id}>
-          <button
-            type="button"
-            disabled={f.decisionId === null}
-            onClick={() => f.decisionId !== null && props.onOpen(f.decisionId)}
-            className="flex w-full flex-col gap-0.5 rounded-md px-3 py-2 text-left hover:bg-accent/60"
-          >
-            <span className="flex min-w-0 items-center gap-1.5">
-              <SeverityPill severity={f.severity} />
-              <b className="min-w-0 truncate font-medium">{f.title}</b>
-              {f.decisionId !== null && <span className="ml-auto shrink-0 text-xs text-dim">{props.titles[f.decisionId]}</span>}
-            </span>
-            <span className={cn('text-muted-foreground', !isOpen(f, props.states) && 'text-dim')}>{f.take}</span>
-          </button>
-        </li>
-      ))}
-    </ul>
-  )
+/** The decision's verdict from its findings that still stand: the worst severity, or that it looks right. */
+export function VerdictPill({ opinion, states }: { opinion: DecisionOpinion; states: FindingStates }) {
+  const worst = worstSeverity(opinion.findings.filter((f) => states[f.id] !== 'dismissed' && f.handledIn === null))
+  return worst ? <SeverityPill severity={worst} /> : <Pill className="border-ok/40 text-ok">Looks right</Pill>
 }
 
 /** The decision's opinion under its note: the author's case, then the findings, with a deeper look on the strongest model. */

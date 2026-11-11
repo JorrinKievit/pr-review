@@ -1,4 +1,4 @@
-import { type AccountStatus, type AgentAccount, agentPresets, defaultSettings, type RepoSettings, Settings } from '@pr-review/domain'
+import { type AccountStatus, type AgentAccount, agentPresets, defaultSettings, opinionsMode, type RepoSettings, Settings, smallPrLines } from '@pr-review/domain'
 import { Effect, Schema } from 'effect'
 import { type ReactNode, useEffect, useState } from 'react'
 import { Input } from '../components/ui/input.tsx'
@@ -48,7 +48,7 @@ function AccountCard(props: { account: AgentAccount; status: AccountStatus | und
   const [env, setEnv] = useState(envText(a.env))
   const set = (patch: Partial<AgentAccount>) => props.onChange({ ...a, ...patch })
   /** Empty clears an optional field. */
-  const setOptional = (key: 'mode' | 'model', value: string) => {
+  const setOptional = (key: 'mode' | 'model' | 'fastModel', value: string) => {
     const { [key]: _, ...rest } = a
     props.onChange(value ? { ...rest, [key]: value } : rest)
   }
@@ -83,12 +83,15 @@ function AccountCard(props: { account: AgentAccount; status: AccountStatus | und
             <input type="checkbox" checked={a.deep ?? false} onChange={(e) => set({ deep: e.target.checked })} /> Use for Dig deeper
           </label>
         </div>
-        <div className="grid grid-cols-3 gap-3">
+        <div className="grid grid-cols-4 gap-3">
           <Field label="Mode" hint="Read-only mode">
             <Input className="font-mono text-sm" value={a.mode ?? ''} placeholder="auto" onChange={(e) => setOptional('mode', e.target.value)} />
           </Field>
           <Field label="Model" hint="Agent default if empty">
             <Input className="font-mono text-sm" value={a.model ?? ''} onChange={(e) => setOptional('model', e.target.value)} />
+          </Field>
+          <Field label="Fast model" hint="For sorting and simpler decisions">
+            <Input className="font-mono text-sm" value={a.fastModel ?? ''} onChange={(e) => setOptional('fastModel', e.target.value)} />
           </Field>
           <Field label="At once">
             <Input type="number" min={1} max={8} value={a.concurrency} onChange={(e) => set({ concurrency: Math.max(1, Number(e.target.value) || 1) })} />
@@ -209,6 +212,19 @@ export function SettingsPage() {
             </Field>
             <Field label="Time limit per run (minutes)">
               <Input type="number" min={1} value={review.timeoutMinutes} onChange={(e) => setReview({ timeoutMinutes: Number(e.target.value) || defaultSettings.review.timeoutMinutes })} />
+            </Field>
+            <Field label="Claude's opinion" hint="Automatic waits for the opinion with the sort; on demand adds a button.">
+              <select
+                className="h-9 rounded-md border border-input bg-transparent px-2 text-sm shadow-xs dark:bg-input/30"
+                value={opinionsMode(settings)}
+                onChange={(e) => setReview({ opinions: e.target.value as 'automatic' | 'on-demand' })}
+              >
+                <option value="automatic">Automatic</option>
+                <option value="on-demand">On demand</option>
+              </select>
+            </Field>
+            <Field label="Small PR threshold (changed lines)" hint="Below this one quick read replaces the piles. Tests, generated files and lockfiles don't count.">
+              <Input type="number" min={0} value={smallPrLines(settings)} onChange={(e) => setReview({ smallPrLines: Number(e.target.value) || 0 })} />
             </Field>
           </div>
         </div>

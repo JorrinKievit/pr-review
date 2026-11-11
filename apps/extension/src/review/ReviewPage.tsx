@@ -1,8 +1,8 @@
-import { RegistryContext, useAtomRefresh, useAtomSet, useAtomValue } from '@effect/atom-react'
-import type { DecisionState, DecisionStates, PrRef, PrView, SortEvent } from '@pr-review/domain'
+import { RegistryContext, useAtomSet, useAtomValue } from '@effect/atom-react'
+import type { DecisionState, DecisionStates, OpinionEvent, PrRef, PrView, ReviewEvent } from '@pr-review/domain'
 import { useHotkeys } from '@tanstack/react-hotkeys'
 import { AsyncResult } from 'effect/reactivity'
-import { useContext, useEffect, useMemo, useState } from 'react'
+import { useContext, useMemo, useState } from 'react'
 import { useAtoms } from '../atoms.ts'
 import { useRemembered } from '../remembered.ts'
 import { failureOf, isUnavailable } from '../result.ts'
@@ -13,9 +13,9 @@ import { Sidebar } from '../shell/Sidebar.tsx'
 import { TopBar } from '../shell/TopBar.tsx'
 import { Button, Spinner } from '../ui/index.tsx'
 import { ChatPanel } from './ChatPanel.tsx'
-import { isOpen } from './Findings.tsx'
-import { buildItems, itemId, nextOpen, stackMoved, startAt } from './items.ts'
+import { buildItems, isOpen, itemId, nextOpen, stackMoved, startAt } from './items.ts'
 import { ItemView } from './ItemView.tsx'
+import { Preparing } from './Preparing.tsx'
 
 export function ReviewPage({ prRef }: { prRef: PrRef }) {
   const { prAtom } = useAtoms()
@@ -38,28 +38,38 @@ export function ReviewPage({ prRef }: { prRef: PrRef }) {
   return <Loaded prRef={prRef} pr={pr.value} />
 }
 
+type ReviewDone = Extract<ReviewEvent, { _tag: 'Done' }>
+
+/** Waits once behind the progress screen, then shows the review from the latest `Done`; a refresh keeps it up until the next one. */
 function Loaded({ prRef, pr }: { prRef: PrRef; pr: PrView }) {
-  const { sortAtom, stateAtom, opinionAtom } = useAtoms()
-  const sortAtomForHead = sortAtom(prRef, pr.headSha)
-  const sortResult = useAtomValue(sortAtomForHead)
-  const retrySort = useAtomRefresh(sortAtomForHead)
-  const saveState = useAtomSet(stateAtom)
-  const sort: SortEvent | undefined = AsyncResult.isSuccess(sortResult) ? sortResult.value : undefined
-  // Shows the cached opinion only; a run happens once asked for and refreshes this when done.
-  const opinionResult = useAtomValue(opinionAtom(prRef, pr.headSha, false))
-  const opinion = AsyncResult.isSuccess(opinionResult) ? opinionResult.value : undefined
-  const done = opinion?._tag === 'Done' ? opinion : undefined
-  const [runningOpinion, setRunningOpinion] = useState(false)
-  // Not useAtomRefresh: that mounts the atom, which would run the opinion on open.
+  const atom = useAtoms().reviewAtom(prRef, pr.headSha)
+  const result = useAtomValue(atom)
+  const event = AsyncResult.isSuccess(result) ? result.value : undefined
+  const [shown, setShown] = useState<ReviewDone>()
+  if (event?._tag === 'Done' && event !== shown) setShown(event)
+  const review = event?._tag === 'Done' ? event : shown
+  if (review) return <Ready prRef={prRef} pr={pr} review={review} />
+  if (AsyncResult.isFailure(result)) return <Ready prRef={prRef} pr={pr} sortError={String((failureOf(result) as { message?: string } | undefined)?.message ?? 'unknown error')} />
+  return <Preparing pr={pr} phases={event?._tag === 'Preparing' ? event.phases : []} />
+}
+
+/** The review, built once per `Done`: its order holds while the page is open. Without one (the sort failed) every file is unsorted. */
+function Ready({ prRef, pr, review, sortError }: { prRef: PrRef; pr: PrView; review?: ReviewDone; sortError?: string }) {
+  const { reviewAtom, stateAtom, opinionAtom } = useAtoms()
   const registry = useContext(RegistryContext)
-  // An opinion carried from an earlier push is matched against this head's sort, so look again once the sort is in.
-  const sorted = sort?._tag === 'Done'
-  useEffect(() => {
-    if (sorted) registry.refresh(opinionAtom(prRef, pr.headSha, false))
-  }, [sorted])
-  const items = useMemo(() => buildItems(pr, sort, opinion), [pr, sort, opinion])
+  const refreshReview = () => registry.refresh(reviewAtom(prRef, pr.headSha))
+  const saveState = useAtomSet(stateAtom)
+  // The cached opinion, which dismissals, deeper looks and runs refresh; until it is read, the one the review came with.
+  const cachedResult = useAtomValue(opinionAtom(prRef, pr.headSha, false))
+  const cached = AsyncResult.isSuccess(cachedResult) && cachedResult.value._tag === 'Done' ? cachedResult.value : undefined
+  const done = cached ?? (review?.opinion ? { opinion: review.opinion, states: review.findingStates } : undefined)
+  const opinionError = review?.opinionError
+  // Idle offers the run: on demand, or when only a carried opinion is here. A failed opinion has its own retry line.
+  const opinion: OpinionEvent | undefined = opinionError || !review ? undefined : done ? { _tag: 'Done', ...done } : { _tag: 'Idle' }
+  const [runningOpinion, setRunningOpinion] = useState(false)
+  const [retrying, setRetrying] = useState(false)
+  const items = useMemo(() => buildItems(pr, review), [pr, review])
   const openFindings = done ? done.opinion.decisions.flatMap((d) => d.findings).filter((f) => isOpen(f, done.states)) : []
-  const titles = Object.fromEntries(items.flatMap((i) => (i.kind === 'decision' ? [[i.decision.id, i.decision.title]] : [])))
 
   const [selectedKey, setSelectedKey] = useRemembered<string | undefined>(`at:${prRef.host}/${prRef.owner}/${prRef.repo}#${prRef.number}`, undefined)
   const [overrides, setOverrides] = useState<Record<string, DecisionState | null>>({})
@@ -69,12 +79,12 @@ function Loaded({ prRef, pr }: { prRef: PrRef; pr: PrView }) {
   const [paletteOpen, setPaletteOpen] = useState(false)
 
   const states: DecisionStates = useMemo(() => {
-    const merged: Record<string, DecisionState> = { ...(sort?._tag === 'Done' ? sort.state : {}) }
+    const merged: Record<string, DecisionState> = { ...review?.state }
     for (const [id, s] of Object.entries(overrides)) s ? (merged[id] = s) : delete merged[id]
     return merged
-  }, [sort, overrides])
+  }, [review, overrides])
 
-  const rereview = (sort?._tag === 'Done' && sort.rereview) || {}
+  const rereview = review?.rereview ?? {}
 
   const chosen = items.findIndex((i) => i.key === selectedKey)
   const index = chosen >= 0 ? chosen : startAt(items, states)
@@ -144,8 +154,28 @@ function Loaded({ prRef, pr }: { prRef: PrRef; pr: PrView }) {
         opinion={opinion}
         running={runningOpinion}
         onRunOpinion={() => setRunningOpinion(true)}
-        onOpinionDone={() => setRunningOpinion(false)}
+        onOpinionDone={() => {
+          setRunningOpinion(false)
+          // A retried opinion comes back through the review, which drops the error and ranks by it.
+          if (retrying) refreshReview()
+          setRetrying(false)
+        }}
       />
+      {opinionError && !runningOpinion && (
+        <div className="flex items-center gap-3 border-b border-border bg-destructive/10 px-3 py-1.5 text-sm">
+          <span>Claude's opinion failed: {opinionError}</span>
+          <Button
+            size="xs"
+            variant="outline"
+            onClick={() => {
+              setRetrying(true)
+              setRunningOpinion(true)
+            }}
+          >
+            Try again
+          </Button>
+        </div>
+      )}
       {done?.opinion.carriedFrom !== undefined && !runningOpinion && (
         <div className="border-b border-border bg-info/10 px-3 py-1.5 text-sm">
           Opinion carried over from an earlier push for {done.opinion.decisions.length} {done.opinion.decisions.length === 1 ? 'decision' : 'decisions'}
@@ -166,10 +196,10 @@ function Loaded({ prRef, pr }: { prRef: PrRef; pr: PrView }) {
           </Button>
         </div>
       )}
-      {AsyncResult.isFailure(sortResult) && (
+      {sortError !== undefined && (
         <div className="flex items-center gap-3 border-b border-border bg-destructive/10 px-3 py-1.5 text-sm">
-          <span>The sort failed: {String((failureOf(sortResult) as { message?: string } | undefined)?.message ?? 'unknown error')}. Files stay unsorted.</span>
-          <Button size="xs" variant="outline" onClick={retrySort}>
+          <span>The sort failed: {sortError}. Files stay unsorted.</span>
+          <Button size="xs" variant="outline" onClick={refreshReview}>
             Sort again
           </Button>
         </div>
@@ -180,8 +210,9 @@ function Loaded({ prRef, pr }: { prRef: PrRef; pr: PrView }) {
           selected={index}
           states={states}
           rereview={rereview}
-          result={sort?._tag === 'Done' ? sort.result : undefined}
+          result={review?.sort}
           findings={openFindings}
+          ticket={done?.opinion.ticketNote || undefined}
           onSelect={select}
         />
         <main key={item.key} className="min-w-0 flex-1 overflow-y-auto">
@@ -198,10 +229,7 @@ function Loaded({ prRef, pr }: { prRef: PrRef; pr: PrView }) {
             onDiscuss={discuss}
             onCommentDone={() => setCommentingOn(undefined)}
             {...(index < items.length - 1 ? { onNext: () => select(index + 1) } : {})}
-            {...(sort?._tag === 'Running' ? { sorting: sort } : {})}
             opinion={done}
-            titles={titles}
-            onOpenDecision={(id) => select(items.findIndex((i) => i.kind === 'decision' && i.decision.id === id))}
           />
         </main>
         {chatOpen && decision && <ChatPanel key={decision.id} prRef={prRef} headSha={pr.headSha} decision={decision} focus={chatFocus} />}

@@ -29,9 +29,9 @@ export const makeAtoms = (client: Client) => {
     return yield* client
   })
   const pr = Atom.family((key: string) => Atom.keepAlive(client.runtime.atom(Effect.flatMap(rpc, (c) => c('GetPr', { ref: parse(key) })))))
-  const sort = Atom.family((key: string) => {
+  const review = Atom.family((key: string) => {
     const [ref, headSha] = key.split('@') as [string, string]
-    return Atom.keepAlive(client.runtime.atom(Stream.unwrap(Effect.map(rpc, (c) => c('Sort', { ref: parse(ref), headSha })))))
+    return Atom.keepAlive(client.runtime.atom(Stream.unwrap(Effect.map(rpc, (c) => c('Review', { ref: parse(ref), headSha })))))
   })
   const patch = Atom.family((key: string) => {
     const { ref, mergeBase, headSha, path, previous } = JSON.parse(key) as { ref: PrRef; mergeBase: string; headSha: string; path: string; previous?: string }
@@ -88,8 +88,8 @@ export const makeAtoms = (client: Client) => {
 
   return {
     prAtom: (ref: PrRef) => pr(refKey(ref)),
-    /** Latest `SortEvent`: Running while the agent works, then Done. */
-    sortAtom: (ref: PrRef, headSha: string) => sort(`${refKey(ref)}@${headSha}`),
+    /** Latest `ReviewEvent`: Preparing while the companion works, then Done with the sort and the opinion. */
+    reviewAtom: (ref: PrRef, headSha: string) => review(`${refKey(ref)}@${headSha}`),
     /** `previous` is the path before the PR moved the file. */
     patchAtom: (ref: PrRef, mergeBase: string, headSha: string, path: string, previous?: string) => patch(JSON.stringify({ ref, mergeBase, headSha, path, previous })),
     stackAtom: (ref: PrRef) => stack(refKey(ref)),

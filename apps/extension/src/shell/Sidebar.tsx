@@ -1,8 +1,8 @@
-import type { DecisionStates, Finding, Rereview, Severity, SortResult } from '@pr-review/domain'
+import type { DecisionStates, Finding, Rereview, SortResult } from '@pr-review/domain'
 import { cn } from '../lib/utils.ts'
-import { SeverityPill, severityLabel, severityTone } from '../review/Findings.tsx'
+import { SeverityPill } from '../review/Findings.tsx'
 import { type Item, itemFiles, itemId, itemTitle, itemTone, worstSeverity } from '../review/items.ts'
-import { Dot, type DotTone, Spinner } from '../ui/index.tsx'
+import { Dot, type DotTone } from '../ui/index.tsx'
 
 type Row = { item: Item; i: number }
 
@@ -15,15 +15,16 @@ export function Sidebar(props: {
   result: SortResult | undefined
   /** Claude's findings still open. */
   findings: ReadonlyArray<Finding>
+  /** What the opinion found about the PR's ticket. */
+  ticket?: string | undefined
   onSelect: (i: number) => void
 }) {
   const groups = [
     { label: 'PR', kind: 'description' },
-    { label: 'Claude', kind: 'findings' },
     { label: 'Decisions', kind: 'decision' },
     { label: 'Skim', kind: 'skim' },
     { label: 'Trusted', kind: 'trusted' },
-    { label: 'Sorting', kind: 'unsorted' },
+    { label: 'Files', kind: 'unsorted' },
   ] as const
   const lines = props.result?.lines
   const total = lines ? lines.decision + lines.skim + lines.trusted || 1 : 1
@@ -34,7 +35,6 @@ export function Sidebar(props: {
     const s = worstSeverity(props.findings.filter((f) => ids.has(f.decisionId ?? undefined)))
     return s && <SeverityPill severity={s} short />
   }
-  const counts = (['blocks', 'should', 'ask'] as const).map((s): [Severity, number] => [s, props.findings.filter((f) => f.severity === s).length]).filter(([, n]) => n > 0)
 
   const row = ({ item, i }: Row) => (
     <button
@@ -50,13 +50,7 @@ export function Sidebar(props: {
       <Dot tone={itemTone(item, verdictOf(item), (itemId(item) ?? '') in props.rereview)} />
       <span className="min-w-0 flex-1 truncate">{item.kind === 'unsorted' ? 'All files' : itemTitle(item)}</span>
       {item.kind === 'decision' && worst([{ item, i }])}
-      {item.kind === 'findings' &&
-        counts.map(([s, n]) => (
-          <span key={s} title={`${n} ${severityLabel[s].toLowerCase()}`} className={cn('text-xs tabular-nums', severityTone[s])}>
-            {n}
-          </span>
-        ))}
-      {item.kind !== 'decision' && item.kind !== 'description' && item.kind !== 'findings' && <span className="text-xs text-dim">{itemFiles(item).length}</span>}
+      {item.kind !== 'decision' && item.kind !== 'description' && <span className="text-xs text-dim">{itemFiles(item).length}</span>}
     </button>
   )
 
@@ -98,19 +92,21 @@ export function Sidebar(props: {
           <i className="block rounded-sm bg-dim" style={{ width: `${(lines.trusted / total) * 100}%` }} />
         </div>
       )}
+      {props.ticket && (
+        <p className="mx-2 mb-1 truncate text-xs text-dim" title={props.ticket}>
+          Ticket: {props.ticket}
+        </p>
+      )}
       {changed > 0 && <p className="mx-2 mb-1 text-xs text-warn">{`${changed} ${changed === 1 ? 'decision' : 'decisions'} changed since you looked`}</p>}
       {groups.map((g) => {
         const rows = props.items.map((item, i) => ({ item, i })).filter((r) => r.item.kind === g.kind)
         if (rows.length === 0) return null
-        const decided = g.kind === 'unsorted' || g.kind === 'description' || g.kind === 'findings' ? undefined : rows.filter((r) => verdictOf(r.item)).length
+        const decided = g.kind === 'unsorted' || g.kind === 'description' ? undefined : rows.filter((r) => verdictOf(r.item)).length
         return (
           <section key={g.kind}>
             <h3 className="flex justify-between px-2 pt-2.5 pb-1 text-xs font-normal text-dim">
-              <span className="flex items-center gap-1.5">
-                {g.label}
-                {g.kind === 'unsorted' && <Spinner className="size-3" />}
-              </span>
-              <span>{decided !== undefined ? `${decided} / ${rows.length}` : g.kind === 'description' || g.kind === 'findings' ? '' : rows.reduce((n, r) => n + itemFiles(r.item).length, 0)}</span>
+              <span>{g.label}</span>
+              <span>{decided !== undefined ? `${decided} / ${rows.length}` : g.kind === 'description' ? '' : rows.reduce((n, r) => n + itemFiles(r.item).length, 0)}</span>
             </h3>
             {g.kind === 'decision'
               ? [...Map.groupBy(rows, (r) => (r.item.kind === 'decision' ? r.item.decision.theme : '')).entries()].map(([name, rs]) => theme(name, rs))

@@ -89,3 +89,18 @@ test('account checkboxes set tickets and deep', async () => {
   await screen.findByText('Saved.', {}, { timeout: 3000 })
   expect((storage.settings as Settings).accounts[0]).toMatchObject({ tickets: true, deep: true })
 })
+
+test("saves Claude's opinion mode, the small PR threshold and a fast model", async () => {
+  const { storage } = setup({ stored: defaultSettings })
+  expect(await screen.findByLabelText(/^Claude's opinion/, {}, { timeout: 3000 })).toHaveValue('automatic')
+  expect(screen.getByLabelText(/^Small PR threshold/)).toHaveValue(200)
+  await userEvent.selectOptions(screen.getByLabelText(/^Claude's opinion/), 'on-demand')
+  await userEvent.clear(screen.getByLabelText(/^Small PR threshold/))
+  await userEvent.type(screen.getByLabelText(/^Small PR threshold/), '120')
+  await userEvent.type(screen.getByLabelText(/^Fast model/), 'haiku')
+  await userEvent.click(screen.getByRole('button', { name: 'Save' }))
+  await screen.findByText('Saved.', {}, { timeout: 3000 })
+  const saved = storage.settings as Settings
+  expect(saved.review).toMatchObject({ opinions: 'on-demand', smallPrLines: 120 })
+  expect(saved.accounts[0]).toMatchObject({ fastModel: 'haiku' })
+})

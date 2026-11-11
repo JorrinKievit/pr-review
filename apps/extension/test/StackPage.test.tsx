@@ -31,6 +31,11 @@ const renderStack = (events: ReadonlyArray<StackEvent>, o: { getPr?: (n: number)
   const companion = fakeCompanion({
     handlers: {
       Stack: () => Stream.concat(Stream.fromIterable(events), Stream.never),
+      Review: ({ ref }) => {
+        const e = events.at(-1)?.entries.find((x) => x.pr.number === ref.number)
+        if (!e?.result) return Stream.never
+        return Stream.make({ _tag: 'Done' as const, sort: e.result, state: e.state, ...(e.rereview ? { rereview: e.rereview } : {}), opinion: e.opinion ?? null, findingStates: e.opinionStates ?? {} })
+      },
       GetPr: ({ ref }) => (o.getPr ? o.getPr(ref.number) : Effect.succeed(view(ref.number))),
       SetState: (p) => Effect.sync(() => void saved.push(p)),
       Opinion: ({ run }) => Stream.fromEffect(Effect.sync(() => void (run && calls.opinion++))).pipe(Stream.as({ _tag: 'Idle' as const })),
@@ -99,7 +104,7 @@ test('the stack summary reads as name and what changed, not one string per line'
   expect(screen.queryByRole('region', { name: 'Modules' })).not.toBeInTheDocument()
 })
 
-test('the sidebar lists decisions under their PR', async () => {
+test('opening a PR shows its own review page', async () => {
   renderStack([
     {
       entries: [
@@ -111,25 +116,16 @@ test('the sidebar lists decisions under their PR', async () => {
   ])
   const nav = await screen.findByRole('navigation', { name: 'Stack' }, { timeout: 3000 })
   await userEvent.click(within(nav).getByRole('button', { name: /#2567/ }))
-  const first = within(nav).getByRole('group', { name: '#2567' })
-  expect(within(first).getAllByRole('button').map((b) => b.textContent)).toEqual(['Decision money', 'Decision fmt'])
-  expect(await screen.findByRole('heading', { name: 'Decision money' })).toBeInTheDocument()
+  expect(await screen.findByText('#2567 PR 2567', {}, { timeout: 3000 })).toBeInTheDocument()
+  expect(await screen.findByRole('heading', { name: /^Decision (money|fmt)$/ }, { timeout: 3000 })).toBeInTheDocument()
 })
 
-test('every file in a PR is reachable: skim areas and trusted groups follow its decisions', async () => {
-  const withRest: SortResult = {
-    ...result([decision('money', 'architecture', 'Data model')]),
-    skim: [{ area: 'Wiring', summary: 'Service registration.', files: ['services.yaml'] }],
-    trusted: [{ group: 'tests', why: 'Only tests.', files: ['MoneyTest.php'] }],
-  }
-  renderStack([{ entries: [{ pr: pr(2567), status: 'done', result: withRest, error: null, state: {} }], overview: null }])
+test('a PR is judged the same in the stack as on its own page', async () => {
+  renderStack([two({ 2567: prOpinion([finding('p1', 2567, 'should', { decisionId: 'money', title: 'Money needs a currency' })]) })])
   const nav = await screen.findByRole('navigation', { name: 'Stack' }, { timeout: 3000 })
   await userEvent.click(within(nav).getByRole('button', { name: /#2567/ }))
-  const group = within(nav).getByRole('group', { name: '#2567' })
-  expect(within(group).getAllByRole('button').map((b) => b.textContent)).toEqual(['Decision money', 'Wiring', 'Tests'])
-  await userEvent.keyboard('j')
-  expect(await screen.findByRole('heading', { name: 'Wiring' })).toBeInTheDocument()
-  expect(screen.getByText('Service registration.')).toBeInTheDocument()
+  await screen.findByRole('heading', { name: 'Decision money' }, { timeout: 3000 })
+  expect(screen.getAllByText('Money needs a currency').length).toBeGreaterThan(0)
 })
 
 test('the PR in view can be reviewed from its bar', async () => {
@@ -141,7 +137,7 @@ test('the PR in view can be reviewed from its bar', async () => {
   expect(screen.getByRole('button', { name: 'Approve' })).toBeInTheDocument()
 })
 
-test('coming back to a stack opens the item the review was on', async () => {
+test('coming back to a stack opens the PR the review was on', async () => {
   const events: StackEvent[] = [
     {
       entries: [
@@ -154,122 +150,56 @@ test('coming back to a stack opens the item the review was on', async () => {
   renderStack(events)
   await screen.findByRole('navigation', { name: 'Stack' }, { timeout: 3000 })
   await userEvent.keyboard(']]')
-  expect(await screen.findByRole('heading', { name: 'Decision meter' })).toBeInTheDocument()
+  expect(await screen.findByRole('heading', { name: 'Decision meter' }, { timeout: 3000 })).toBeInTheDocument()
   cleanup()
   renderStack(events)
   expect(await screen.findByRole('heading', { name: 'Decision meter' }, { timeout: 3000 })).toBeInTheDocument()
 })
 
-test('a remembered item that is gone, after a push, falls back to the overview', async () => {
+test('a remembered item from before the PR page was embedded falls back to the overview', async () => {
   remembered.set(`at:stack:${ref.host}/${ref.owner}/${ref.repo}#${ref.number}`, JSON.stringify({ kind: 'decision', key: '2567:d:old' }))
   renderStack([{ entries: [{ pr: pr(2567), status: 'done', result: result([decision('money', 'architecture', 'Data model')]), error: null, state: {} }], overview: null }])
   expect(await screen.findByRole('list', { name: 'PRs in this stack' }, { timeout: 3000 })).toBeInTheDocument()
 })
 
-test('a PR that could not be loaded says why and can be tried again', async () => {
-  let calls = 0
+test('a PR that could not be loaded says why', async () => {
   renderStack([{ entries: [{ pr: pr(2567), status: 'done', result: result([decision('money', 'architecture', 'Data model')]), error: null, state: {} }], overview: null }], {
-    getPr: (n) => (++calls === 1 ? Effect.fail(new GitError({ message: 'git fetch: cannot lock ref' })) : Effect.succeed(view(n))),
+    getPr: () => Effect.fail(new GitError({ message: 'git fetch: cannot lock ref' })),
   })
   const nav = await screen.findByRole('navigation', { name: 'Stack' }, { timeout: 3000 })
   await userEvent.click(within(nav).getByRole('button', { name: /#2567/ }))
   expect(await screen.findByText(/cannot lock ref/, {}, { timeout: 3000 })).toBeInTheDocument()
-  await userEvent.click(screen.getByRole('button', { name: 'Try again' }))
-  expect(await screen.findByRole('heading', { name: 'Decision money' }, { timeout: 3000 })).toBeInTheDocument()
 })
 
-const twoPrs: StackEvent = {
-  entries: [
-    { pr: pr(2567), status: 'done', result: result([decision('money', 'architecture', 'Data model'), decision('fmt', 'quality', 'Formatting')]), error: null, state: { money: 'accepted' } },
-    { pr: pr(2568), status: 'done', result: result([decision('meter', 'architecture', 'Data model')]), error: null, state: {} },
-  ],
-  overview: null,
-}
-
-test('accepting the last open item of a PR without comments moves on to the next PR', async () => {
-  renderStack([twoPrs])
-  const nav = await screen.findByRole('navigation', { name: 'Stack' }, { timeout: 3000 })
-  await userEvent.click(within(nav).getByRole('button', { name: /#2567/ }))
-  await screen.findByRole('heading', { name: 'Decision fmt' })
-  await userEvent.keyboard('a')
-  await screen.findByRole('heading', { name: 'Decision meter' }, { timeout: 3000 })
-  expect(screen.queryByRole('textbox', { name: 'Review summary' })).toBeNull()
-})
-
-test('with comments pending, the last accept opens the review in view, and sending it moves on to the next PR', async () => {
-  const scrolled: Element[] = []
-  const spy = vi.spyOn(Element.prototype, 'scrollIntoView').mockImplementation(function (this: Element) {
-    scrolled.push(this)
-  })
-  onTestFinished(() => spy.mockRestore())
-  const { reviews } = renderStack([twoPrs], { drafts: [{ id: 'x', path: 'fmt.php', line: 1, side: 'RIGHT', body: 'Rename this' }] })
-  const nav = await screen.findByRole('navigation', { name: 'Stack' }, { timeout: 3000 })
-  await userEvent.click(within(nav).getByRole('button', { name: /#2567/ }))
-  await screen.findByRole('heading', { name: 'Decision fmt' })
-  await userEvent.keyboard('a')
-  await waitFor(() => expect(screen.getByRole('textbox', { name: 'Review summary' })).toHaveFocus(), { timeout: 3000 })
-  // The Review button sits at the top of the scrolled pane; a popover anchored off-screen never shows.
-  expect(scrolled).toContain(screen.getByRole('button', { name: /^Review/ }))
-  await userEvent.click(screen.getByRole('button', { name: 'Request changes' }))
-  await screen.findByRole('heading', { name: 'Decision meter' }, { timeout: 3000 })
-  expect(reviews).toEqual([2567])
-})
-
-test('a PR with a body lists its description first and opens on it until reviewing starts', async () => {
-  renderStack([
-    {
-      entries: [
-        { pr: { ...pr(2567), hasBody: true }, status: 'done', result: result([decision('money', 'architecture', 'Data model')]), error: null, state: {} },
-        { pr: { ...pr(2568), hasBody: true }, status: 'done', result: result([decision('meter', 'architecture', 'Data model')]), error: null, state: { meter: 'accepted' } },
-      ],
-      overview: null,
-    },
-  ])
-  const nav = await screen.findByRole('navigation', { name: 'Stack' }, { timeout: 3000 })
-  await userEvent.click(within(nav).getByRole('button', { name: /#2567/ }))
-  expect(within(within(nav).getByRole('group', { name: '#2567' })).getAllByRole('button').map((b) => b.textContent)).toEqual(['Description', 'Decision money'])
-  expect(await screen.findByRole('heading', { name: 'Description' })).toBeInTheDocument()
-  await userEvent.click(within(nav).getByRole('button', { name: /#2568/ }))
-  expect(await screen.findByRole('heading', { name: 'Decision meter' })).toBeInTheDocument()
-})
-
-test('[ and ] move between PRs, j and k through decisions in stack order', async () => {
+test('[ and ] move between PRs', async () => {
   renderStack([
     {
       entries: [
         { pr: pr(2567), status: 'done', result: result([decision('money', 'architecture', 'Data model')]), error: null, state: {} },
-        { pr: pr(2568), status: 'done', result: result([decision('meter', 'architecture', 'Data model'), decision('fmt', 'quality', 'Formatting')]), error: null, state: { meter: 'accepted' } },
-      ],
-      overview: null,
-    },
-  ])
-  await screen.findByRole('list', { name: 'PRs in this stack' }, { timeout: 3000 })
-  await userEvent.keyboard(']')
-  expect(await screen.findByRole('heading', { name: 'Decision money' }, { timeout: 3000 })).toBeInTheDocument()
-  await userEvent.keyboard(']')
-  expect(await screen.findByRole('heading', { name: 'Decision fmt' }, { timeout: 3000 })).toBeInTheDocument()
-  await userEvent.keyboard('k')
-  expect(await screen.findByRole('heading', { name: 'Decision meter' }, { timeout: 3000 })).toBeInTheDocument()
-  await userEvent.keyboard('[[')
-  expect(await screen.findByRole('heading', { name: 'Decision money' }, { timeout: 3000 })).toBeInTheDocument()
-})
-
-test('accept in the stack saves the verdict on its PR and moves to its next open item', async () => {
-  const { saved } = renderStack([
-    {
-      entries: [
-        { pr: pr(2567), status: 'done', result: result([decision('money', 'architecture', 'Data model'), decision('fmt', 'quality', 'Formatting')]), error: null, state: {} },
         { pr: pr(2568), status: 'done', result: result([decision('meter', 'architecture', 'Data model')]), error: null, state: {} },
       ],
       overview: null,
     },
   ])
   await screen.findByRole('list', { name: 'PRs in this stack' }, { timeout: 3000 })
-  await userEvent.keyboard('j')
+  await userEvent.keyboard(']')
   expect(await screen.findByRole('heading', { name: 'Decision money' }, { timeout: 3000 })).toBeInTheDocument()
+  await userEvent.keyboard(']')
+  expect(await screen.findByRole('heading', { name: 'Decision meter' }, { timeout: 3000 })).toBeInTheDocument()
+  await userEvent.keyboard('[[')
+  expect(await screen.findByRole('heading', { name: 'Decision money' }, { timeout: 3000 })).toBeInTheDocument()
+  await userEvent.keyboard('[[')
+  expect(await screen.findByRole('list', { name: 'PRs in this stack' }, { timeout: 3000 })).toBeInTheDocument()
+})
+
+test('verdicts given on the PR page count in the stack nav', async () => {
+  const { saved } = renderStack([{ entries: [{ pr: pr(2567), status: 'done', result: result([decision('money', 'architecture', 'Data model')]), error: null, state: {} }], overview: null }])
+  const nav = await screen.findByRole('navigation', { name: 'Stack' }, { timeout: 3000 })
+  await userEvent.click(within(nav).getByRole('button', { name: /#2567/ }))
+  await screen.findByRole('heading', { name: 'Decision money' }, { timeout: 3000 })
   await userEvent.keyboard('a')
-  expect(await screen.findByRole('heading', { name: 'Decision fmt' }, { timeout: 3000 })).toBeInTheDocument()
-  await waitFor(() => expect(saved).toEqual([{ ref: { ...ref, number: 2567 }, headSha: 's2567', decisionId: 'money', state: 'accepted' }]))
+  await waitFor(() => expect(within(nav).getByRole('button', { name: /#2567/ }).textContent).toMatch(/1\/1$/))
+  expect(saved).toEqual([{ ref: { ...ref, number: 2567 }, headSha: 's2567', decisionId: 'money', state: 'accepted' }])
 })
 
 test('failed sorts say why', async () => {
@@ -363,7 +293,15 @@ test('dismissed PR findings stay hidden, and findings with the same id on two PR
 test('a stack finding opens its PR', async () => {
   renderStack([two()], { stackOpinion: { _tag: 'Done', opinion: { heads: {}, findings: [finding('s1', 2568, 'should')] } }, cached: true })
   await userEvent.click(await screen.findByRole('button', { name: /Title s1/ }, { timeout: 3000 }))
-  expect(await screen.findByText(/PR 2 of 2/)).toBeInTheDocument()
+  expect(await screen.findByText('#2568 PR 2568', {}, { timeout: 3000 })).toBeInTheDocument()
+})
+
+test('a PR finding opens its PR on that decision', async () => {
+  const two2 = (n: number) => ({ pr: pr(n), status: 'done' as const, result: result([decision('money', 'architecture', 'Data model'), decision('fmt', 'quality', 'Formatting')]), error: null, state: { money: 'accepted' as const } })
+  renderStack([{ entries: [two2(2567), { ...two2(2568), opinion: prOpinion([finding('p1', 2568, 'should', { decisionId: 'money', title: 'Look here' })]) }], overview: null }])
+  await userEvent.click(await screen.findByRole('button', { name: /Look here/ }, { timeout: 3000 }))
+  expect(await screen.findByRole('heading', { name: 'Decision money' }, { timeout: 3000 })).toBeInTheDocument()
+  expect(screen.getByText('#2568 PR 2568')).toBeInTheDocument()
 })
 
 test('shows the stack opinion\'s step while it runs', async () => {

@@ -113,7 +113,7 @@ const agentTraced = Layer.effect(
         Effect.gen(function* () {
           const from = yield* Clock.currentTimeMillis
           const out = yield* agent.ticket(o)
-          console.log(`${at()} ticket read: ${Math.round(((yield* Clock.currentTimeMillis) - from) / 1000)}s`)
+          console.log(`${at()} ticket read (${o.model ?? 'main'}): ${Math.round(((yield* Clock.currentTimeMillis) - from) / 1000)}s`)
           return out
         }),
       session: (o, use) =>

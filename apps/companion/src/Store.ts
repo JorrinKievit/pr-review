@@ -1,4 +1,4 @@
-import { AgentError, AskTarget, ChatTurn, DecisionOpinion, DecisionState, DecisionStates, Draft, FileStat, FindingStates, GitError, GitHubError, PrOpinion, RepoNotConfigured, Rereview, SortResult, StackOverview } from '@pr-review/domain'
+import { AgentError, AskTarget, ChatTurn, DecisionOpinion, DecisionState, DecisionStates, Draft, FileStat, FindingStates, GitError, GitHubError, PrOpinion, RepoNotConfigured, Rereview, SortResult, StackOpinion, StackOverview } from '@pr-review/domain'
 import { Context, Effect, Exit, Layer, Schema } from 'effect'
 import { KeyValueStore, Persistable, Persistence } from 'effect/persistence'
 import { NodeServices } from '@effect/platform-node'
@@ -48,6 +48,14 @@ export class OverviewKey extends Persistable.Class<{
 }>()('OverviewKey', {
   primaryKey: (k) => digest(`${k.host}/${k.owner}/${k.repo} stack ${k.entries[0]?.number}@${k.entries.at(-1)?.headSha}`),
   success: StackOverview,
+  error: errors,
+}) {}
+
+export class StackOpinionKey extends Persistable.Class<{
+  payload: { host: string; owner: string; repo: string; heads: ReadonlyArray<{ number: number; headSha: string }> }
+}>()('StackOpinionKey', {
+  primaryKey: (k) => digest(`${k.host}/${k.owner}/${k.repo} stack opinion ${k.heads.map((h) => `${h.number}@${h.headSha}`).join(' ')}`),
+  success: StackOpinion,
   error: errors,
 }) {}
 

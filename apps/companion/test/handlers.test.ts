@@ -13,6 +13,7 @@ import { CompanionRpcs, HandlersLive, LoggedLive } from '../src/handlers.ts'
 import { Opiner } from '../src/Opiner.ts'
 import { Overview } from '../src/Overview.ts'
 import { Sorter } from '../src/Sorter.ts'
+import { StackOpiner } from '../src/StackOpiner.ts'
 import { Store } from '../src/Store.ts'
 import { Tickets } from '../src/Tickets.ts'
 import { configLayer, fakeAgent, fakeGit, fakeGitHub, overviewReply, pr, ref } from './fakes.ts'
@@ -57,12 +58,12 @@ const setup = (
       ? Effect.fail(new AgentError({ message: o.overviewFails }))
       : Effect.as(
           o.delay ? Effect.sleep(o.delay) : Effect.void,
-          call.log.kind === 'overview' ? overviewReply : call.log.kind === 'opinion' || call.log.kind === 'deeper' ? opinionReply : (o.sorts?.[sorted++] ?? sortReply),
+          call.log.kind === 'overview' ? overviewReply : call.log.kind === 'stack-opinion' ? { findings: [] } : call.log.kind === 'opinion' || call.log.kind === 'deeper' ? opinionReply : (o.sorts?.[sorted++] ?? sortReply),
         ),
   )
   const deps = Layer.mergeAll(agent.layer, (o.git ?? fakeGit({ files: o.files ?? files, diff: o.diff ?? 'd' })).layer, fakeGitHub({ listOpenPrs: () => Effect.succeed([entry(7, 'master', 'feat')]), ...o.github }), configLayer())
   const store = Store.layerWith(KeyValueStore.layerMemory)
-  const services = Layer.mergeAll(Opiner.layer, Asker.layer, Overview.layer).pipe(Layer.provideMerge(Layer.mergeAll(Sorter.layer, Tickets.layer)), Layer.provideMerge(store), Layer.provideMerge(deps))
+  const services = Layer.mergeAll(StackOpiner.layer, Asker.layer, Overview.layer).pipe(Layer.provideMerge(Opiner.layer), Layer.provideMerge(Layer.mergeAll(Sorter.layer, Tickets.layer)), Layer.provideMerge(store), Layer.provideMerge(deps))
   const layer = HandlersLive.pipe(Layer.provide(services))
   // Built in the test's scope, like the companion's process scope: the handlers outlive each client call.
   const client = Effect.flatMap(Layer.build(Layer.merge(layer, LoggedLive)), (ctx) => RpcTest.makeClient(CompanionRpcs).pipe(Effect.provideContext(ctx)))
@@ -408,5 +409,32 @@ describe('handlers', () => {
       yield* c.SetFindingState({ ref, headSha: 'HEAD1', findingId: 'b', state: null })
       const done = (yield* Stream.runCollect(c.Opinion({ ref, headSha: 'HEAD1', run: false }))).at(-1)!
       assert.deepStrictEqual(done._tag === 'Done' && done.states, { a: 'posted' })
+    }).pipe(Effect.scoped))
+
+  it.effect('Stack entries carry cached PR opinions', () =>
+    Effect.gen(function* () {
+      const c = yield* setup({ sorts: [{ decisions: [d1], skim: [], claims: [] }], github: { listOpenPrs: () => Effect.succeed([entry(7, 'master', 'feat'), entry(8, 'feat', 'feat2')]) } }).client
+      yield* Stream.runCollect(c.Opinion({ ref, headSha: 'sha7', run: true }))
+      const last = (yield* Stream.runCollect(c.Stack({ ref }))).at(-1)!
+      assert.deepStrictEqual(last.entries.map((e) => e.opinion?.decisions[0]?.findings[0]?.id), ['d1:0', undefined])
+      assert.notProperty(last.entries[1]!, 'opinion')
+    }).pipe(Effect.scoped))
+
+  it.effect('StackOpinion run false is Idle', () =>
+    Effect.gen(function* () {
+      const { agent, client } = setup()
+      const c = yield* client
+      assert.deepStrictEqual(tags(yield* Stream.runCollect(c.StackOpinion({ ref, run: false }))), ['Idle'])
+      assert.strictEqual(agent.calls.length, 0)
+    }).pipe(Effect.scoped))
+
+  it.effect('StackOpinion run true answers Done, and is cached after', () =>
+    Effect.gen(function* () {
+      const { agent, client } = setup()
+      const c = yield* client
+      const done = (yield* Stream.runCollect(c.StackOpinion({ ref, run: true }))).at(-1)!
+      assert.deepStrictEqual(done._tag === 'Done' && done.opinion, { heads: { 7: 'sha7' }, findings: [] })
+      assert.deepStrictEqual(tags(yield* Stream.runCollect(c.StackOpinion({ ref, run: false }))), ['Done'])
+      assert.deepStrictEqual(agent.calls.map((x) => x.log.kind), ['stack-opinion'])
     }).pipe(Effect.scoped))
 })

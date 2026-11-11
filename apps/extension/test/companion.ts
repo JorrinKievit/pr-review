@@ -27,6 +27,7 @@ export const fakeCompanion = (o: { sortEvents?: ReadonlyArray<SortEvent>; onSort
     SetFindingState: unused,
     Ask: () => Stream.die('unused'),
     Stack: () => Stream.die('unused'),
+    StackOpinion: () => Stream.make({ _tag: 'Idle' as const }),
     GetChats: () => Effect.succeed([]),
     GetDescription: () => Effect.succeed(''),
     GetDrafts: () => Effect.succeed([]),

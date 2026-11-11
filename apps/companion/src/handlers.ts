@@ -1,4 +1,4 @@
-import { type DecisionState, type DeeperEvent, type DecisionStates, type Draft, type FindingStates, type OpinionEvent, type PrOpinion, type PrRef, type Rereview, ReviewRpcs, type SortResult, type SortEvent, type StackEntry, type StackEntryStatus, type StackEvent, targetKey } from '@pr-review/domain'
+import { type DecisionState, type DeeperEvent, type DecisionStates, type Draft, type FindingStates, type OpinionEvent, type PrOpinion, type PrRef, type Rereview, ReviewRpcs, type SortResult, type SortEvent, type StackEntry, type StackEntryStatus, type StackEvent, type StackOpinion, type StackOpinionEvent, targetKey } from '@pr-review/domain'
 import { Cause, Clock, Effect, Exit, Fiber, Layer, Option, Queue, type Scope, Stream } from 'effect'
 import { RpcMiddleware } from 'effect/rpc'
 import { PersistedCache } from 'effect/persistence'
@@ -12,6 +12,7 @@ import { Opiner } from './Opiner.ts'
 import { Overview } from './Overview.ts'
 import { Sorter } from './Sorter.ts'
 import { buildStack } from './stack.ts'
+import { StackOpiner } from './StackOpiner.ts'
 import { cacheOptions, type Chats, type OverviewEntry, PatchKey, Store, storeFailuresDie } from './Store.ts'
 
 /** Set by the release bundle; 0.0.0 is a companion run from source. */
@@ -85,6 +86,7 @@ export const HandlersLive = ReviewRpcs.toLayer(
     const store = yield* Store
     const sorter = yield* Sorter
     const opiner = yield* Opiner
+    const stackOpiner = yield* StackOpiner
     const asker = yield* Asker
     const overview = yield* Overview
     const agent = yield* Agent
@@ -260,7 +262,9 @@ export const HandlersLive = ReviewRpcs.toLayer(
         Stream.callback<StackEvent, Effect.Error<ReturnType<typeof openStack>>>((queue) =>
           Effect.gen(function* () {
             const { stack } = yield* openStack(ref)
-            const entries: StackEntryStatus[] = stack.map((pr) => ({ pr, status: 'queued', result: null, error: null, state: {} }))
+            const entries: StackEntryStatus[] = yield* Effect.forEach(stack, (pr) =>
+              Effect.map(opiner.cached({ ...ref, number: pr.number }, pr.headSha), (opinion): StackEntryStatus => ({ pr, status: 'queued', result: null, error: null, state: {}, ...(opinion ? { opinion } : {}) })),
+            )
             let overviewResult: StackEvent['overview'] = null
             let overviewError: string | undefined
             const emit = () => Queue.offer(queue, { entries: [...entries], overview: overviewResult, ...(overviewError ? { overviewError } : {}) })
@@ -309,6 +313,12 @@ export const HandlersLive = ReviewRpcs.toLayer(
             yield* Queue.end(queue)
           }),
         ),
+
+      StackOpinion: ({ ref, run }) => {
+        const done = (opinion: StackOpinion) => Effect.succeed<StackOpinionEvent>({ _tag: 'Done', opinion })
+        if (run) return progress(scope, stackOpiner.opine(ref), stackOpiner.steps(ref), done)
+        return Stream.unwrap(Effect.map(stackOpiner.cached(ref), (hit) => (hit ? Stream.fromEffect(done(hit)) : Stream.succeed<StackOpinionEvent>({ _tag: 'Idle' }))))
+      },
 
       Recall: ({ key }) => store.remembered.get(key).pipe(Effect.map(Option.getOrNull), Effect.orDie),
 

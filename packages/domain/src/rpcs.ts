@@ -2,7 +2,7 @@ import { Schema } from 'effect'
 import { Rpc, RpcGroup } from 'effect/rpc'
 import { AgentError, CompanionUnavailable, ReviewRejected, GitError, GitHubError, RepoNotConfigured } from './errors.ts'
 import { AskEvent, AskTarget, Chat, DecisionState, Draft, PrRef, PrView, SortEvent, StackEvent } from './schemas.ts'
-import { DeeperEvent, FindingState, OpinionEvent } from './opinion.ts'
+import { DeeperEvent, FindingState, OpinionEvent, StackOpinionEvent } from './opinion.ts'
 import { AccountStatus, Settings } from './settings.ts'
 
 // CompanionUnavailable is raised by the extension's background when the native host is missing or gone.
@@ -59,6 +59,13 @@ export class ReviewRpcs extends RpcGroup.make(
   Rpc.make('GetDescription', { payload: { ref: PrRef }, success: Schema.String, error: PrFailure }),
   Rpc.make('GetChats', { payload: { ref: PrRef, headSha: Schema.String }, success: Schema.Array(Chat), error: CompanionUnavailable }),
   Rpc.make('Stack', { payload: { ref: PrRef }, success: StackEvent, error: PrFailure, stream: true }),
+  /** One opinion on the whole stack (never a PR opinion per PR): a cached one, `Idle` when there is none and `run` is false, else a run. */
+  Rpc.make('StackOpinion', {
+    payload: { ref: PrRef, run: Schema.Boolean },
+    success: StackOpinionEvent,
+    error: Schema.Union([RepoNotConfigured, GitError, GitHubError, AgentError, CompanionUnavailable]),
+    stream: true,
+  }),
   /** Small page state kept between visits (where a review left off, unsent text), as JSON strings by key. */
   Rpc.make('Recall', { payload: { key: Schema.String }, success: Schema.NullOr(Schema.String), error: CompanionUnavailable }),
   Rpc.make('Remember', { payload: { key: Schema.String, value: Schema.String }, error: CompanionUnavailable }),

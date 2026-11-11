@@ -1,4 +1,5 @@
 import { Schema } from 'effect'
+import { PrOpinion } from './opinion.ts'
 
 export const FileStat = Schema.Struct({
   path: Schema.String,
@@ -202,6 +203,8 @@ export const StackEntryStatus = Schema.Struct({
   rereview: Schema.optionalKey(Rereview),
   /** While running: what the sort is doing right now. */
   step: Schema.optionalKey(Schema.String),
+  /** The PR opinion cached for this head, if one ran. */
+  opinion: Schema.optionalKey(PrOpinion),
 })
 export type StackEntryStatus = typeof StackEntryStatus.Type
 

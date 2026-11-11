@@ -96,6 +96,10 @@ export const Decision = Schema.Struct({
 })
 export type Decision = typeof Decision.Type
 
+const highImpactReasons: ReadonlyArray<Reason> = ['shared-layer', 'data-model', 'permissions', 'departs', 'duplicate', 'dependency']
+
+export const impact = (d: Decision): 'high' | 'low' => (d.lens === 'architecture' || highImpactReasons.includes(d.reason) ? 'high' : 'low')
+
 export const SkimArea = Schema.Struct({ area: Schema.String, summary: Schema.String, files: Schema.Array(Schema.String) })
 export type SkimArea = typeof SkimArea.Type
 
@@ -124,6 +128,8 @@ export const SortResult = Schema.Struct({
   claims: Schema.Array(AuthorClaim),
   unclaimedDecisionIds: Schema.Array(Schema.String),
   lines: Schema.Struct({ decision: Schema.Number, skim: Schema.Number, trusted: Schema.Number }),
+  /** Set on the quick pass of a small PR; the full sort replaces it. */
+  quick: Schema.optionalKey(Schema.Boolean),
 })
 export type SortResult = typeof SortResult.Type
 
@@ -217,3 +223,38 @@ export const StackEvent = Schema.Struct({
   overviewError: Schema.optional(Schema.String),
 })
 export type StackEvent = typeof StackEvent.Type
+
+export const Phase = Schema.Struct({
+  id: Schema.Literals(['fetch', 'sort', 'quick', 'opinion']),
+  /** Names a count or the thing being worked on, such as "Sorting 42 files". */
+  label: Schema.String,
+  state: Schema.Literals(['waiting', 'running', 'done', 'failed']),
+  startedAt: Schema.optionalKey(Schema.String),
+  endedAt: Schema.optionalKey(Schema.String),
+  workers: Schema.Array(
+    Schema.Struct({
+      account: Schema.String,
+      /** Such as "Judging 3 of 6: <title>". */
+      current: Schema.optionalKey(Schema.String),
+      /** The last tool step. */
+      step: Schema.optionalKey(Schema.String),
+      /** Up to 4 earlier steps. */
+      recent: Schema.Array(Schema.String),
+    }),
+  ),
+})
+export type Phase = typeof Phase.Type
+
+/** A prepared review: progress while it is built, then everything the review page renders. */
+export const ReviewEvent = Schema.Union([
+  Schema.TaggedStruct('Preparing', { phases: Schema.Array(Phase) }),
+  Schema.TaggedStruct('Done', {
+    sort: SortResult,
+    state: DecisionStates,
+    rereview: Schema.optionalKey(Rereview),
+    opinion: Schema.NullOr(PrOpinion),
+    opinionError: Schema.optionalKey(Schema.String),
+    findingStates: FindingStates,
+  }),
+])
+export type ReviewEvent = typeof ReviewEvent.Type

@@ -251,6 +251,10 @@ export const HandlersLive = ReviewRpcs.toLayer(
           Effect.map(verdictsFor(ref, headSha, result), (v): SortEvent => ({ _tag: 'Done', result, ...v })),
         ),
 
+      Review: () => Stream.die('not implemented until Task 3'),
+
+      Prepare: () => Effect.void,
+
       Opinion: ({ ref, headSha, run }) => {
         const done = (opinion: PrOpinion) => Effect.map(findingStatesFor(ref, headSha), (states): OpinionEvent => ({ _tag: 'Done', opinion, states }))
         if (run) return progress(scope, Effect.tap(opiner.opine(ref, headSha), (o) => keepOpinion(ref, headSha, o)), opiner.steps(ref, headSha), done)

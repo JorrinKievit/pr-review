@@ -20,6 +20,8 @@ export const AgentAccount = Schema.Struct({
   tickets: Schema.optionalKey(Schema.Boolean),
   /** Strongest model, used for Dig deeper. */
   deep: Schema.optionalKey(Schema.Boolean),
+  /** Cheaper model for the quick pass of a small PR. */
+  fastModel: Schema.optionalKey(Schema.String),
 })
 export type AgentAccount = typeof AgentAccount.Type
 
@@ -56,6 +58,10 @@ export const Settings = Schema.Struct({
     /** Above this many kilobytes the diff is left out and the agent reads files itself. */
     maxDiffKb: Schema.Number,
     timeoutMinutes: Schema.Number,
+    /** Whether Claude's opinion runs with the review (default automatic) or only when asked. */
+    opinions: Schema.optionalKey(Schema.Literals(['automatic', 'on-demand'])),
+    /** Under this many changed lines (rule-trusted files not counted) a PR is small; default 200. */
+    smallPrLines: Schema.optionalKey(Schema.Number),
   }),
   /** Per-repo review settings, keyed `host/owner/repo`. */
   repos: Schema.optionalKey(Schema.Record(Schema.String, RepoSettings)),
@@ -63,6 +69,10 @@ export const Settings = Schema.Struct({
 export type Settings = typeof Settings.Type
 
 export const repoSettings = (s: Settings, repoKey: string): RepoSettings => s.repos?.[repoKey] ?? { related: [] }
+
+export const opinionsMode = (s: Settings): 'automatic' | 'on-demand' => s.review.opinions ?? 'automatic'
+
+export const smallPrLines = (s: Settings): number => s.review.smallPrLines ?? 200
 
 /** Ready-made agents from the ACP registry. Agents without an npx package need their CLI installed. */
 export const agentPresets = [

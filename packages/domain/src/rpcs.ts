@@ -1,7 +1,7 @@
 import { Schema } from 'effect'
 import { Rpc, RpcGroup } from 'effect/rpc'
 import { AgentError, CompanionUnavailable, ReviewRejected, GitError, GitHubError, RepoNotConfigured } from './errors.ts'
-import { AskEvent, AskTarget, Chat, DecisionState, Draft, PrRef, PrView, SortEvent, StackEvent } from './schemas.ts'
+import { AskEvent, AskTarget, Chat, DecisionState, Draft, PrRef, PrView, ReviewEvent, SortEvent, StackEvent } from './schemas.ts'
 import { DeeperEvent, FindingState, OpinionEvent, RuleDraft, StackOpinionEvent } from './opinion.ts'
 import { AccountStatus, Settings } from './settings.ts'
 
@@ -27,6 +27,15 @@ export class ReviewRpcs extends RpcGroup.make(
     error: Schema.Union([RepoNotConfigured, GitError, GitHubError, AgentError, CompanionUnavailable]),
     stream: true,
   }),
+  /** The whole prepared review in one stream: `Preparing` progress, then `Done` with sort, opinion and states. */
+  Rpc.make('Review', {
+    payload: { ref: PrRef, headSha: Schema.String },
+    success: ReviewEvent,
+    error: Schema.Union([RepoNotConfigured, GitError, GitHubError, AgentError, CompanionUnavailable]),
+    stream: true,
+  }),
+  /** Starts preparing a review early, so it is ready when the reviewer opens it. */
+  Rpc.make('Prepare', { payload: { ref: PrRef }, error: CompanionUnavailable }),
   Rpc.make('SetState', {
     payload: { ref: PrRef, headSha: Schema.String, decisionId: Schema.String, state: Schema.NullOr(DecisionState) },
     error: CompanionUnavailable,

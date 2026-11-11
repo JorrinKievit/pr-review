@@ -20,6 +20,8 @@ export const fakeCompanion = (o: { sortEvents?: ReadonlyArray<SortEvent>; onSort
       Stream.concat(Stream.fromIterable(o.sortEvents ?? []).pipe(Stream.mapEffect((e) => Effect.as(Effect.sleep(20), e))), Stream.never).pipe(
         Stream.ensuring(Effect.sync(() => o.onSortEnd?.())),
       ),
+    Review: () => Stream.never,
+    Prepare: () => Effect.void,
     GetPr: unused,
     SetState: unused,
     Opinion: () => Stream.make({ _tag: 'Idle' as const }),

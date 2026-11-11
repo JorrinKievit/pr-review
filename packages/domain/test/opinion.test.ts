@@ -1,6 +1,6 @@
 import { describe, expect, it } from '@effect/vitest'
 import { Schema } from 'effect'
-import { type Finding, lowerSeverity, PrOpinion, rankFindings } from '../src/index.ts'
+import { type Decision, impact, type Finding, lowerSeverity, PrOpinion, rankFindings } from '../src/index.ts'
 
 let n = 0
 const f = (over: Partial<Finding>): Finding => ({
@@ -62,4 +62,12 @@ describe('PrOpinion', () => {
     const json = JSON.stringify(Schema.encodeSync(PrOpinion)(opinion))
     expect(Schema.decodeUnknownSync(Schema.fromJsonString(PrOpinion))(json)).toEqual(opinion)
   })
+})
+
+it('impact marks architecture and risky reasons high', () => {
+  const d = (lens: Decision['lens'], reason: Decision['reason']) => ({ lens, reason }) as Decision
+  expect(impact(d('architecture', 'config'))).toBe('high')
+  for (const r of ['shared-layer', 'data-model', 'permissions', 'departs', 'duplicate', 'dependency'] as const) expect(impact(d('quality', r))).toBe('high')
+  expect(impact(d('quality', 'convention'))).toBe('low')
+  expect(impact(d('ui', 'config'))).toBe('low')
 })

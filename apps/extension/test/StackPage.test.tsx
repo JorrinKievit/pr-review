@@ -365,3 +365,9 @@ test('a stack finding opens its PR', async () => {
   await userEvent.click(await screen.findByRole('button', { name: /Title s1/ }, { timeout: 3000 }))
   expect(await screen.findByText(/PR 2 of 2/)).toBeInTheDocument()
 })
+
+test('shows the stack opinion\'s step while it runs', async () => {
+  renderStack([{ ...two(), stackOpinion: { running: true, step: 'Reading the diff of #2568' } }])
+  expect(await screen.findByText('Judging the stack: Reading the diff of #2568', {}, { timeout: 3000 })).toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: 'Judge the stack' })).toBeNull()
+})

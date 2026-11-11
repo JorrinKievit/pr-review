@@ -221,6 +221,8 @@ export const StackEvent = Schema.Struct({
   overview: Schema.NullOr(StackOverview),
   /** Set when the overview could not be written; the stream ends without one. */
   overviewError: Schema.optional(Schema.String),
+  /** The stack opinion that starts by itself once every PR is sorted (automatic mode). */
+  stackOpinion: Schema.optionalKey(Schema.Struct({ running: Schema.Boolean, step: Schema.optionalKey(Schema.String), error: Schema.optionalKey(Schema.String) })),
 })
 export type StackEvent = typeof StackEvent.Type
 

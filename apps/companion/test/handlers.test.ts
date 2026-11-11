@@ -147,12 +147,32 @@ describe('handlers', () => {
       const { agent, client } = setup({ github: { listOpenPrs: () => Effect.succeed([entry(8, 'feat', 'feat2'), entry(7, 'master', 'feat')]) } })
       const c = yield* client
       const events = yield* Stream.runCollect(c.Stack({ ref: { ...ref, number: 8 } }))
-      assert.deepStrictEqual(agent.calls.map((x) => x.log.kind), ['sort', 'sort', 'overview'])
+      assert.deepStrictEqual(agent.calls.map((x) => x.log.kind), ['sort', 'sort', 'overview', 'stack-opinion'])
       assert.deepStrictEqual(agent.calls.slice(0, 2).map((x) => x.log.number), [7, 8])
       assert.deepStrictEqual(events[0]!.entries.map((e) => e.status), ['queued', 'queued'])
       const last = events.at(-1)!
       assert.deepStrictEqual(last.entries.map((e) => [e.pr.number, e.status]), [[7, 'done'], [8, 'done']])
       assert.deepStrictEqual(last.overview, overviewReply)
+    }).pipe(Effect.scoped))
+
+  it.live('stack opinion starts after every PR is sorted, once', () =>
+    Effect.gen(function* () {
+      const { agent, client } = setup({ github: { listOpenPrs: () => Effect.succeed([entry(8, 'feat', 'feat2'), entry(7, 'master', 'feat')]) } })
+      const c = yield* client
+      const first = yield* Stream.runCollect(c.Stack({ ref: { ...ref, number: 8 } }))
+      assert.deepStrictEqual(first.at(-1)!.stackOpinion, { running: false })
+      assert.isTrue(first.some((e) => e.stackOpinion?.running))
+      yield* Stream.runCollect(c.Stack({ ref: { ...ref, number: 8 } }))
+      assert.strictEqual(agent.calls.filter((x) => x.log.kind === 'stack-opinion').length, 1)
+      const kinds = agent.calls.map((x) => x.log.kind)
+      assert.isTrue(kinds.lastIndexOf('sort') < kinds.indexOf('stack-opinion'))
+    }).pipe(Effect.scoped))
+
+  it.live('no PR opinion runs from the stack view', () =>
+    Effect.gen(function* () {
+      const { agent, client } = setup()
+      yield* Stream.runCollect((yield* client).Stack({ ref }))
+      assert.strictEqual(opinionCalls(agent.calls), 0)
     }).pipe(Effect.scoped))
 
   it.live('Stack ends with why the overview failed, so the page stops waiting for it', () =>

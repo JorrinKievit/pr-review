@@ -1,4 +1,4 @@
-import { AgentError, AgentRule, appendPatch, inGuidance, ruleBranch, ruleTitle, type DecisionState, type DeeperEvent, type DecisionOpinion, type DecisionStates, type Draft, type FindingStates, type OpinionEvent, type PrOpinion, type PrRef, type Rereview, type ReviewEvent, ReviewRpcs, type SortResult, type SortEvent, type StackEntry, type StackEntryStatus, type StackEvent, type StackOpinion, type StackOpinionEvent, targetKey } from '@pr-review/domain'
+import { AgentError, AgentRule, appendPatch, inGuidance, opinionsMode, ruleBranch, ruleTitle, type DecisionState, type DeeperEvent, type DecisionOpinion, type DecisionStates, type Draft, type FindingStates, type OpinionEvent, type PrOpinion, type PrRef, type Rereview, type ReviewEvent, ReviewRpcs, type SortResult, type SortEvent, type StackEntry, type StackEntryStatus, type StackEvent, type StackOpinion, type StackOpinionEvent, targetKey } from '@pr-review/domain'
 import { readFileSync } from 'node:fs'
 import { Cause, Clock, Effect, Exit, Fiber, Layer, Option, Queue, type Scope, Stream } from 'effect'
 import { RpcMiddleware } from 'effect/rpc'
@@ -379,7 +379,8 @@ export const HandlersLive = ReviewRpcs.toLayer(
             )
             let overviewResult: StackEvent['overview'] = null
             let overviewError: string | undefined
-            const emit = () => Queue.offer(queue, { entries: [...entries], overview: overviewResult, ...(overviewError ? { overviewError } : {}) })
+            let stackOpinion: StackEvent['stackOpinion']
+            const emit = () => Queue.offer(queue, { entries: [...entries], overview: overviewResult, ...(overviewError ? { overviewError } : {}), ...(stackOpinion ? { stackOpinion } : {}) })
             yield* emit()
 
             const sorted: OverviewEntry[] = []
@@ -420,6 +421,18 @@ export const HandlersLive = ReviewRpcs.toLayer(
                 overviewError = made.failure.message
                 yield* Effect.logWarning(`Overview #${ref.number} failed: ${overviewError}`)
               }
+              yield* emit()
+            }
+
+            if (opinionsMode(yield* config.settings) === 'automatic' && entries.every((e) => e.status === 'done') && !(yield* stackOpiner.cached(ref))) {
+              stackOpinion = { running: true }
+              yield* emit()
+              const fiber = yield* Effect.forkIn(stackOpiner.opine(ref), scope)
+              const steps = yield* Effect.forkChild(
+                Stream.runForEach(stackOpiner.steps(ref), (step) => Effect.suspend(() => ((stackOpinion = { running: true, step }), emit()))),
+              )
+              const outcome = yield* Effect.result(Fiber.join(fiber)).pipe(Effect.ensuring(Fiber.interrupt(steps)))
+              stackOpinion = outcome._tag === 'Success' ? { running: false } : { running: false, error: outcome.failure.message }
               yield* emit()
             }
             yield* Queue.end(queue)

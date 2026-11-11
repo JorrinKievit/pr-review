@@ -1,7 +1,7 @@
 import { useAtomRefresh, useAtomValue } from '@effect/atom-react'
-import { type Finding, type PrRef, rankFindings, type SortResult, type StackEntryStatus, type StackOverview } from '@pr-review/domain'
+import { type Finding, type PrRef, rankFindings, type SortResult, type StackEntryStatus, type StackEvent, type StackOverview } from '@pr-review/domain'
 import { AsyncResult } from 'effect/reactivity'
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useAtoms } from '../atoms.ts'
 import { cn } from '../lib/utils.ts'
 import { failureOf } from '../result.ts'
@@ -42,6 +42,7 @@ export function Overview(props: {
   entries: ReadonlyArray<StackEntryStatus>
   overview: StackOverview | null
   overviewError?: string | undefined
+  stackOpinion?: StackEvent['stackOpinion']
   progress: (pr: number) => { decided: number; total: number }
   onOpen: (pr: number) => void
   onOpenDecision: (pr: number, decisionId: string) => void
@@ -85,7 +86,7 @@ export function Overview(props: {
           )
         })}
       </ol>
-      <StackFindings prRef={props.prRef} entries={props.entries} onOpen={props.onOpen} onOpenDecision={props.onOpenDecision} />
+      <StackFindings prRef={props.prRef} stackOpinion={props.stackOpinion} entries={props.entries} onOpen={props.onOpen} onOpenDecision={props.onOpenDecision} />
       {overview ? (
         <>
           <h2 className="mb-2 text-lg font-medium">What the stack changes</h2>
@@ -137,12 +138,20 @@ export function Overview(props: {
 }
 
 /** Judge the stack (never PR opinions), then one ranked list: the stack's findings and every cached PR opinion's. */
-function StackFindings(props: { prRef: PrRef; entries: ReadonlyArray<StackEntryStatus>; onOpen: (pr: number) => void; onOpenDecision: (pr: number, decisionId: string) => void }) {
+function StackFindings(props: { prRef: PrRef; stackOpinion?: StackEvent['stackOpinion']; entries: ReadonlyArray<StackEntryStatus>; onOpen: (pr: number) => void; onOpenDecision: (pr: number, decisionId: string) => void }) {
   const { stackOpinionAtom } = useAtoms()
   const [running, setRunning] = useState(false)
-  const cached = useAtomValue(stackOpinionAtom(props.prRef, false))
+  const cachedAtom = stackOpinionAtom(props.prRef, false)
+  const cached = useAtomValue(cachedAtom)
+  const refreshCached = useAtomRefresh(cachedAtom)
+  const auto = props.stackOpinion
+  const wasRunning = useRef(false)
+  useEffect(() => {
+    if (wasRunning.current && !auto?.running && !auto?.error) refreshCached()
+    wasRunning.current = !!auto?.running
+  }, [auto?.running, auto?.error, refreshCached])
   const stackFindings = AsyncResult.isSuccess(cached) && cached.value._tag === 'Done' ? cached.value.opinion.findings : []
-  const pending = running && !(AsyncResult.isSuccess(cached) && cached.value._tag === 'Done')
+  const pending = (running || !!auto?.running) && !(AsyncResult.isSuccess(cached) && cached.value._tag === 'Done')
   const all: Finding[] = [
     ...stackFindings,
     ...props.entries.flatMap((e) => e.opinion?.decisions.flatMap((d) => d.findings.filter((f) => e.opinionStates?.[f.id] !== 'dismissed')) ?? []),
@@ -153,11 +162,12 @@ function StackFindings(props: { prRef: PrRef; entries: ReadonlyArray<StackEntryS
     <section aria-label="Claude's findings section" className="mb-6">
       <div className="mb-2 flex items-center gap-3">
         <h2 className="text-lg font-medium">Claude's findings</h2>
-        {running ? <Judging prRef={props.prRef} /> : (
+        {auto?.running ? <Working step={`Judging the stack: ${auto.step ?? 'reading the stack'}`} /> : running ? <Judging prRef={props.prRef} /> : (
           <Button size="xs" variant="outline" onClick={() => setRunning(true)}>
             Judge the stack
           </Button>
         )}
+        {auto?.error && !auto.running && <span className="text-destructive">The stack judgement failed: {auto.error}</span>}
       </div>
       {rows.length === 0 ? (
         !pending && <p className="text-muted-foreground">No findings yet.</p>

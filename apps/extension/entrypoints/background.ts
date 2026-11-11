@@ -1,5 +1,6 @@
-import { HOST_NAME } from '@pr-review/domain'
+import { HOST_NAME, type PrRef } from '@pr-review/domain'
 import { Effect, Layer } from 'effect'
+import { prepareDebounce } from '../src/prepare.ts'
 import { registerHosts } from '../src/hosts.ts'
 import { relay } from '../src/relay.ts'
 import { storedSettings } from '../src/settings/store.ts'
@@ -12,7 +13,14 @@ export default defineBackground(() => {
     port.onDisconnect.addListener((p) => (lastError = chrome.runtime.lastError?.message ?? (p as { error?: { message?: string } }).error?.message))
     return { port, lastError: () => lastError }
   }
-  Effect.runFork(Layer.launch(relay(native, chrome.runtime.onConnect, storedSettings, chrome.runtime.getManifest().version)))
+  const allow = prepareDebounce()
+  const prepares = {
+    addListener: (f: (ref: PrRef) => void) =>
+      chrome.runtime.onMessage.addListener((msg: { prepare?: PrRef }) => {
+        if (msg.prepare && allow(msg.prepare)) f(msg.prepare)
+      }),
+  }
+  Effect.runFork(Layer.launch(relay(native, chrome.runtime.onConnect, storedSettings, chrome.runtime.getManifest().version, prepares)))
 
   const syncHosts = () => void Effect.runPromise(storedSettings).then((s) => registerHosts(s?.hosts ?? []))
   syncHosts()

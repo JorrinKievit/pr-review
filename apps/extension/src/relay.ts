@@ -1,4 +1,4 @@
-import { CompanionUnavailable, ReviewRpcs, type Settings } from '@pr-review/domain'
+import { CompanionUnavailable, type PrRef, ReviewRpcs, type Settings } from '@pr-review/domain'
 import { makePortClient, type OnConnectLike, type PortLike, portServer } from '@pr-review/native-messaging'
 import { Deferred, Effect, Exit, Fiber, Layer, Option, Scope, Semaphore, Stream } from 'effect'
 import type { RpcClient, RpcClientError, RpcGroup } from 'effect/rpc'
@@ -23,7 +23,7 @@ type Connection = { client: Client; scope: Scope.Closeable; died: Deferred.Defer
  * opened on first use and closed `IDLE` after the last page leaves. A dead host fails calls with
  * CompanionUnavailable; the next call reconnects.
  */
-export const relay = (native: NativeConnect, pages: OnConnectLike, settings: Effect.Effect<Settings | undefined> = Effect.succeed(undefined), version?: string) =>
+export const relay = (native: NativeConnect, pages: OnConnectLike, settings: Effect.Effect<Settings | undefined> = Effect.succeed(undefined), version?: string, prepares?: { addListener: (f: (ref: PrRef) => void) => void }) =>
   Layer.unwrap(
     Effect.gen(function* () {
       const services = yield* Effect.context<never>()
@@ -120,6 +120,9 @@ export const relay = (native: NativeConnect, pages: OnConnectLike, settings: Eff
         SetDrafts: (p) => call((c) => c.SetDrafts(p)),
         SubmitReview: (p) => call((c) => c.SubmitReview(p)),
       })
+
+      // Early start from a PR page: best effort, no companion means nothing happens.
+      prepares?.addListener((ref) => run(Effect.ignore(call((c) => c.Prepare({ ref })))))
 
       const counted: OnConnectLike = {
         addListener: (f) =>

@@ -1,3 +1,4 @@
+import { prepareOncePerLoad } from '../src/prepare.ts'
 import { reviewUrlFor } from '../src/redirect.ts'
 
 export default defineContentScript({
@@ -6,11 +7,14 @@ export default defineContentScript({
   runAt: 'document_start',
   main() {
     let seen = ''
+    const nextPrepare = prepareOncePerLoad()
     const go = () => {
       if (location.href === seen) return
       seen = location.href
       const target = reviewUrlFor(location.href, browser.runtime.getURL('/'))
-      if (target) void browser.runtime.sendMessage({ open: target })
+      if (target) return void browser.runtime.sendMessage({ open: target })
+      const ref = nextPrepare(location.href)
+      if (ref) void browser.runtime.sendMessage({ prepare: ref })
     }
     go()
     // GitHub switches PR tabs client-side and its events vary by version, so watch the URL instead.

@@ -39,6 +39,18 @@ const setup = (o: { onSortEnd?: () => void; settings?: Settings; configured?: Se
   })
 
 describe('relay', () => {
+  it.effect('a prepare from the background reaches the companion, and without one nothing throws', () =>
+    Effect.gen(function* () {
+      const prepared: unknown[] = []
+      const companion = fakeCompanion({ handlers: { Prepare: ({ ref }) => Effect.sync(() => void prepared.push(ref)) } })
+      yield* Layer.build(companion.server)
+      let fire: (r: typeof ref) => void = () => {}
+      yield* Layer.build(relay(() => ({ port: companion.hub.connect(), lastError: () => undefined }), memoryHub().onConnect, Effect.succeed(undefined), undefined, { addListener: (f) => (fire = f) }))
+      fire(ref)
+      yield* flush
+      assert.deepStrictEqual(prepared, [ref])
+    }).pipe(Effect.scoped))
+
   it.effect('configures the companion with the stored settings before the first call', () =>
     Effect.gen(function* () {
       const configured: Settings[] = []

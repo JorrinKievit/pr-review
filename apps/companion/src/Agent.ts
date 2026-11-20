@@ -210,12 +210,16 @@ export class Agent extends Context.Service<
                 ).pipe(Effect.tap(() => step(o, `${a.name} is reading the PR`)), Scope.provide(scope)),
               )
               let onFast = false
+              let mainRan = false
+              // Once the main model has read the session, a fast turn stays on it: the fast model would read all of
+              // it again uncached, which costs several main turns and is no quicker.
+              const choose = (model: 'fast' | 'main'): 'fast' | 'main' => (model === 'fast' && a.fastModel && !mainRan ? 'fast' : 'main')
               const toModel = (s: AcpSession, model: 'fast' | 'main') => {
                 if (model === 'fast') {
-                  if (!a.fastModel) return Effect.void
                   onFast = true
-                  return s.setModel(a.fastModel)
+                  return s.setModel(a.fastModel!)
                 }
+                mainRan = true
                 const main = a.model ?? s.defaultModel
                 if (!onFast || !main) return Effect.void
                 onFast = false
@@ -241,12 +245,13 @@ export class Agent extends Context.Service<
                 })
               const turns: AgentTurns = {
                 ready: Effect.asVoid(open),
-                structured: (prompt, schema, model = 'main', turnKind) =>
+                structured: (prompt, schema, asked = 'main', turnKind) =>
                   turn(
                     turnKind ? { ...o.log, kind: turnKind } : o.log,
                     a,
                     Effect.gen(function* () {
                       const s = yield* open
+                      const model = choose(asked)
                       yield* toModel(s, model)
                       yield* annotate({ modelChoice: model, model: (model === 'fast' && a.fastModel) || a.model || s.defaultModel })
                       const decode = (text: string) =>

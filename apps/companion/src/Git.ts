@@ -1,5 +1,5 @@
 import { type FileStat, GitError, type RepoNotConfigured } from '@pr-review/domain'
-import { Cache, Context, Effect, Exit, FileSystem, Layer, Stream } from 'effect'
+import { Cache, Context, Effect, Exit, FileSystem, Layer, Semaphore, Stream } from 'effect'
 import { ChildProcess, ChildProcessSpawner } from 'effect/process'
 import { dirname, join } from 'node:path'
 import { Config } from './Config.ts'
@@ -92,19 +92,29 @@ export class Git extends Context.Service<
       // A bare clone's HEAD is the remote's default branch at clone time.
       const branchOf = (key: string) => Effect.andThen(ensureClone(key), inRepo(key, 'symbolic-ref', '--short', 'HEAD')).pipe(Effect.map((s) => s.trim()))
 
+      // Fetches into one clone write the same base refs; two at once fail each other's ref updates.
+      const fetching = new Map<string, Semaphore.Semaphore>()
+      const oneFetch = (key: string) => fetching.get(key) ?? fetching.set(key, Semaphore.makeUnsafe(1)).get(key)!
+
       const fetches = yield* Cache.makeWith(
         (spec: string) =>
           Effect.gen(function* () {
             const [key, n, baseRef, wanted] = JSON.parse(spec) as [string, number, string, string]
             yield* ensureClone(key)
             const defaultBranch = yield* branchOf(key)
-            const refspecs = [`+pull/${n}/head:refs/pr/${n}`, `+refs/heads/${baseRef}:refs/remotes/origin/${baseRef}`]
+            // The full ref name: under the user's `fetch.prune`, git takes a short source for a ref the remote lacks and prunes refs/pr/n.
+            const refspecs = [`+refs/pull/${n}/head:refs/pr/${n}`, `+refs/heads/${baseRef}:refs/remotes/origin/${baseRef}`]
             if (baseRef !== defaultBranch) refspecs.push(`+refs/heads/${defaultBranch}:refs/remotes/origin/${defaultBranch}`)
             // A head already fetched (before a restart) needs no network: a base that moved on since leaves the merge-base where it was.
-            const local = yield* inRepo(key, 'rev-parse', ...refspecs.map((r) => r.split(':')[1]!)).pipe(Effect.orElseSucceed(() => ''))
-            const network = local.split('\n')[0] !== wanted
+            const url = yield* remoteUrl(key)
+            const targets = refspecs.map((r) => r.split(':')[1]!)
+            const upToDate = inRepo(key, 'rev-parse', ...targets).pipe(
+              Effect.map((local) => local.split('\n')[0] === wanted),
+              Effect.orElseSucceed(() => false),
+            )
+            // Checked again once it is this fetch's turn: the one before it may have brought the head in.
+            const network = !(yield* upToDate) && (yield* Semaphore.withPermit(oneFetch(key))(Effect.flatMap(upToDate, (now) => (now ? Effect.succeed(false) : Effect.as(inRepo(key, 'fetch', '--quiet', '--no-prune', url, ...refspecs), true)))))
             yield* annotate({ network, refspecs: refspecs.length })
-            if (network) yield* inRepo(key, 'fetch', '--quiet', yield* remoteUrl(key), ...refspecs)
             const headSha = (yield* inRepo(key, 'rev-parse', `refs/pr/${n}`)).trim()
             const baseSha = (yield* inRepo(key, 'rev-parse', `refs/remotes/origin/${baseRef}`)).trim()
             const mergeBase = (yield* inRepo(key, 'merge-base', baseSha, headSha)).trim()

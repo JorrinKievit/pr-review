@@ -240,6 +240,13 @@ describe('Agent.session', () => {
       assert.deepStrictEqual(mainOnly.models, [])
     }))
 
+  it.live('a fast turn after a main turn stays on the main model', () =>
+    Effect.gen(function* () {
+      const { layer, models } = setup(answer, [{ ...account('a'), model: 'big', fastModel: 'quick' }])
+      yield* twoTurns('main', 'fast').pipe(Effect.provide(layer))
+      assert.deepStrictEqual(models, [])
+    }))
+
   it.live('no fastModel means no switch', () =>
     Effect.gen(function* () {
       const { layer, models } = setup(answer, [{ ...account('a'), model: 'big' }])

@@ -134,6 +134,32 @@ describe('Git', () => {
       }),
     ))
 
+  it.live('a pushed head is fetched when the user prunes on fetch', () =>
+    run((g, remote) =>
+      Effect.gen(function* () {
+        yield* g.fetchPr(key, 7, 'master', git(remote, 'rev-parse', 'feat'))
+        git(g.dir(key), 'config', 'fetch.prune', 'true')
+        git(remote, 'checkout', '-q', 'feat')
+        git(remote, 'commit', '-q', '--allow-empty', '-m', 'pushed')
+        git(remote, 'update-ref', 'refs/pull/7/head', 'feat')
+        const pushed = git(remote, 'rev-parse', 'feat')
+        assert.strictEqual((yield* g.fetchPr(key, 7, 'master', pushed)).headSha, pushed)
+      }),
+    ))
+
+  it.live('PRs on one base fetch at once after the base moved', () =>
+    run((g, remote) =>
+      Effect.gen(function* () {
+        const numbers = [11, 12, 13, 14, 15, 16]
+        yield* g.fetchPr(key, 7, 'master', git(remote, 'rev-parse', 'feat'))
+        git(remote, 'commit', '-q', '--allow-empty', '-m', 'base moved')
+        for (const n of numbers) git(remote, 'update-ref', `refs/pull/${n}/head`, 'feat')
+        const head = git(remote, 'rev-parse', 'feat')
+        const all = yield* Effect.all(numbers.map((n) => g.fetchPr(key, n, 'master', head)), { concurrency: 'unbounded' })
+        assert.deepStrictEqual(all.map((r) => r.baseSha), numbers.map(() => git(remote, 'rev-parse', 'master')))
+      }),
+    ))
+
   it.live('a failing git command becomes GitError with stderr', () =>
     run((g, remote) =>
       Effect.gen(function* () {

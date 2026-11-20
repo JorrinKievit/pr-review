@@ -13,6 +13,13 @@ export class GitHubError extends Schema.TaggedError<GitHubError>()('GitHubError'
 /** GitHub refused the review, usually because a commented line is gone from the PR; the drafts stay. */
 export class ReviewRejected extends Schema.TaggedError<ReviewRejected>()('ReviewRejected', { message: Schema.String }) {}
 
+/** The reviewer stopped Claude's review of this PR; nothing runs for it until they start it again. */
+export class ReviewStopped extends Schema.TaggedError<ReviewStopped>()('ReviewStopped', {}) {
+  override get message() {
+    return "You stopped Claude's review of this PR."
+  }
+}
+
 export class AgentError extends Schema.TaggedError<AgentError>()('AgentError', { message: Schema.String }) {}
 
 export class CompanionUnavailable extends Schema.TaggedError<CompanionUnavailable>()('CompanionUnavailable', {

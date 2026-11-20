@@ -16,6 +16,7 @@ import { ChatPanel } from './ChatPanel.tsx'
 import { buildItems, isOpen, type Item, itemId, nextOpen, stackMoved, startAt } from './items.ts'
 import { ItemView } from './ItemView.tsx'
 import { Preparing } from './Preparing.tsx'
+import { Stopped } from './Stopped.tsx'
 
 /** What the stack view passes when it shows a PR's review inside it. */
 type Embed = {
@@ -42,6 +43,7 @@ export function ReviewPage({ prRef, ...embed }: { prRef: PrRef } & Embed) {
         <Spinner /> Fetching #{prRef.number}…
       </main>
     )
+  if (pr.value.stopped) return <Stopped prRef={prRef} pr={pr.value} />
   return <Loaded prRef={prRef} pr={pr.value} {...embed} />
 }
 
@@ -49,15 +51,23 @@ type ReviewDone = Extract<ReviewEvent, { _tag: 'Done' }>
 
 /** Waits once behind the progress screen, then shows the review from the latest `Done`; a refresh keeps it up until the next one. */
 function Loaded({ prRef, pr, ...embed }: { prRef: PrRef; pr: PrView } & Embed) {
-  const atom = useAtoms().reviewAtom(prRef, pr.headSha)
+  const { reviewAtom, prAtom } = useAtoms()
+  const registry = useContext(RegistryContext)
+  const atom = reviewAtom(prRef, pr.headSha)
   const result = useAtomValue(atom)
+  // A review stopped elsewhere (another tab, the stack view) ends with ReviewStopped; reading the PR again shows it stopped.
+  const stopped = (failureOf(result) as { _tag?: string } | undefined)?._tag === 'ReviewStopped'
+  useEffect(() => {
+    if (stopped) registry.refresh(prAtom(prRef))
+  }, [stopped, registry, prAtom, prRef])
   const event = AsyncResult.isSuccess(result) ? result.value : undefined
   const [shown, setShown] = useState<ReviewDone>()
   if (event?._tag === 'Done' && event !== shown) setShown(event)
   const review = event?._tag === 'Done' ? event : shown
   if (review) return <Ready prRef={prRef} pr={pr} review={review} {...embed} />
+  if (stopped) return <Stopped prRef={prRef} pr={pr} />
   if (AsyncResult.isFailure(result)) return <Ready prRef={prRef} pr={pr} {...embed} sortError={String((failureOf(result) as { message?: string } | undefined)?.message ?? 'unknown error')} />
-  return <Preparing pr={pr} phases={event?._tag === 'Preparing' ? event.phases : []} />
+  return <Preparing prRef={prRef} pr={pr} phases={event?._tag === 'Preparing' ? event.phases : []} />
 }
 
 /** The review, built once per `Done`: its order holds while the page is open. Without one (the sort failed) every file is unsorted. */

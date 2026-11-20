@@ -65,6 +65,11 @@ export class Reviewer extends Context.Service<
     result(ref: PrRef, headSha: string): Effect.Effect<Review, SortError>
     /** The running preparation's review so far: from the sort on, then after each decision judged. Never ends; empty when nothing runs. */
     partial(ref: PrRef, headSha: string): Stream.Stream<Review>
+    /** Marks the PR stopped, so `prepare` leaves it alone, then interrupts its runs (any head) and waits for them to end. */
+    stop(ref: PrRef): Effect.Effect<void>
+    /** Clears the mark `stop` set. */
+    resume(ref: PrRef): Effect.Effect<void>
+    isStopped(ref: PrRef): Effect.Effect<boolean>
   }
 >()('pr-review/Reviewer') {
   static readonly layer = Layer.effect(
@@ -79,8 +84,11 @@ export class Reviewer extends Context.Service<
       const store = yield* Store
       const tickets = yield* Tickets
       const scope = yield* Effect.scope
-      const keyOf = (ref: PrRef, headSha: string) => `${ref.host}/${ref.owner}/${ref.repo}#${ref.number}@${headSha}`
-      const runs = new Map<string, { phases: Phases; partial: SubscriptionRef.SubscriptionRef<Review | undefined>; done: Deferred.Deferred<Review, SortError> }>()
+      const prKey = (ref: PrRef) => `${ref.host}/${ref.owner}/${ref.repo}#${ref.number}`
+      const keyOf = (ref: PrRef, headSha: string) => `${prKey(ref)}@${headSha}`
+      type Run = { phases: Phases; partial: SubscriptionRef.SubscriptionRef<Review | undefined>; done: Deferred.Deferred<Review, SortError>; fiber?: Fiber.Fiber<Review, SortError> }
+      const runs = new Map<string, Run>()
+      const isStopped = (ref: PrRef) => store.stopped.has(prKey(ref)).pipe(Effect.orDie)
 
       /** Small PRs get one turn on the whole change instead of piles. Undefined means sort as usual. */
       const quick = Effect.fnUntraced(function* (ref: PrRef, headSha: string, t: Tracker, ticket: Fiber.Fiber<TicketSummary>) {
@@ -491,10 +499,10 @@ export class Reviewer extends Context.Service<
         // Another caller may have started one while these were made.
         const raced = runs.get(key)
         if (raced) return raced
-        const run = { phases, partial, done }
+        const run: Run = { phases, partial, done }
         runs.set(key, run)
         const t = tracker(phases, partial)
-        yield* Effect.forkIn(
+        run.fiber = yield* Effect.forkIn(
           work(ref, headSha, t).pipe(
             measure('operation', { kind: 'review', owner: ref.owner, repo: ref.repo, prNumber: ref.number, headSha }),
             Effect.onError(() => t.failRunning),
@@ -506,7 +514,7 @@ export class Reviewer extends Context.Service<
       })
 
       return Reviewer.of({
-        prepare: (ref, headSha) => Effect.asVoid(ensure(ref, headSha)),
+        prepare: (ref, headSha) => Effect.flatMap(isStopped(ref), (stopped) => (stopped ? Effect.void : Effect.asVoid(ensure(ref, headSha)))),
         progress: (ref, headSha) =>
           Stream.unwrap(
             Effect.sync(() => {
@@ -522,6 +530,15 @@ export class Reviewer extends Context.Service<
               return run ? SubscriptionRef.changes(run.partial).pipe(Stream.filter((r): r is Review => r !== undefined)) : Stream.empty
             }),
           ),
+        stop: (ref) =>
+          Effect.gen(function* () {
+            yield* Effect.orDie(store.stopped.set(prKey(ref), true))
+            const mine = [...runs].filter(([key]) => key.startsWith(`${prKey(ref)}@`)).flatMap(([, run]) => (run.fiber ? [run.fiber] : []))
+            yield* Fiber.interruptAll(mine)
+            yield* sorter.cancel(ref)
+          }),
+        resume: (ref) => Effect.orDie(store.stopped.remove(prKey(ref))),
+        isStopped,
       })
     }),
   )

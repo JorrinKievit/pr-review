@@ -181,6 +181,8 @@ export const PrView = Schema.Struct({
   stack: Schema.Array(StackEntry),
   /** Who is reviewing: GitHub doesn't let authors approve or request changes on their own PR. */
   viewer: Schema.String,
+  /** The reviewer stopped Claude's review of this PR; nothing runs until they start it again. */
+  stopped: Schema.Boolean,
 })
 export type PrView = typeof PrView.Type
 

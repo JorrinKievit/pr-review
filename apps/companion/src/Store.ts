@@ -135,6 +135,8 @@ export class Store extends Context.Service<
     readonly findings: KeyValueStore.SchemaStore<typeof FindingStates>
     /** Page state between visits, opaque to the companion. */
     readonly remembered: KeyValueStore.SchemaStore<typeof Schema.String>
+    /** Per PR (not per head): set when the reviewer stopped Claude's review; nothing runs for it until they start it again. */
+    readonly stopped: KeyValueStore.SchemaStore<typeof Schema.Boolean>
   }
 >()('pr-review/Store') {
   /** Store plus the `Persistence` that cached services build their `PersistedCache` on. */
@@ -153,6 +155,7 @@ export class Store extends Context.Service<
             rereview: KeyValueStore.toSchemaStore(KeyValueStore.prefix(store, 'rereview/'), Rereview),
             remembered: KeyValueStore.toSchemaStore(KeyValueStore.prefix(store, 'remembered/'), Schema.String),
             findings: KeyValueStore.toSchemaStore(KeyValueStore.prefix(store, 'findings/'), FindingStates),
+            stopped: KeyValueStore.toSchemaStore(KeyValueStore.prefix(store, 'stopped/'), Schema.Boolean),
           })
         }),
       ),

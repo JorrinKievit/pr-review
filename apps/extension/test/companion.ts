@@ -23,6 +23,8 @@ export const fakeCompanion = (
     Sort: () => spaced(o.sortEvents).pipe(Stream.ensuring(Effect.sync(() => o.onSortEnd?.()))),
     Review: () => spaced(o.reviewEvents),
     Prepare: () => Effect.succeed(true),
+    StopReview: () => Effect.void,
+    ResumeReview: () => Effect.void,
     GetPr: unused,
     SetState: unused,
     Opinion: () => Stream.make({ _tag: 'Idle' as const }),

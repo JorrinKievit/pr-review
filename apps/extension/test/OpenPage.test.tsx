@@ -10,7 +10,7 @@ const ref = { host: 'github.com', owner: 'acme', repo: 'core', number: 7 }
 const entry = (number: number) => ({ number, title: `#${number}`, baseRef: 'b', headRef: 'h', headSha: 's' })
 const pr = (stack: PrView['stack']): PrView => ({
   number: 7, title: 't', author: 'a', body: '', baseRef: 'master', headRef: 'h', headSha: 'H', state: 'open',
-  host: ref.host, owner: ref.owner, repo: ref.repo, baseSha: 'B', mergeBase: 'MB', defaultBranch: 'master', files: [], threads: [], checks: 'pass', stack, viewer: 'me',
+  host: ref.host, owner: ref.owner, repo: ref.repo, baseSha: 'B', mergeBase: 'MB', defaultBranch: 'master', files: [], threads: [], checks: 'pass', stack, viewer: 'me', stopped: false,
 })
 const scopes: Scope.Closeable[] = []
 afterEach(() => scopes.splice(0).forEach((s) => Effect.runFork(Scope.close(s, Exit.void))))

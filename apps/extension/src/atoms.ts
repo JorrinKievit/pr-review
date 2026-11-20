@@ -93,6 +93,20 @@ export const makeAtoms = (client: Client) => {
     /** `previous` is the path before the PR moved the file. */
     patchAtom: (ref: PrRef, mergeBase: string, headSha: string, path: string, previous?: string) => patch(JSON.stringify({ ref, mergeBase, headSha, path, previous })),
     stackAtom: (ref: PrRef) => stack(refKey(ref)),
+    /** Stops Claude's review of the PR; it stays stopped until `resumeReviewAtom`. */
+    stopReviewAtom: client.runtime.fn((ref: PrRef) => Effect.flatMap(rpc, (c) => c('StopReview', { ref }))),
+    /** Lets a stopped PR be reviewed again; the PR is read again so its page shows the review. */
+    resumeReviewAtom: client.runtime.fn((a: { ref: PrRef; headSha: string }, get) =>
+      Effect.flatMap(rpc, (c) => c('ResumeReview', { ref: a.ref })).pipe(
+        Effect.tap(() =>
+          Effect.sync(() => {
+            // A review stopped while open keeps its interrupted result; start it again before the page shows it.
+            get.refresh(review(`${refKey(a.ref)}@${a.headSha}`))
+            get.refresh(pr(refKey(a.ref)))
+          }),
+        ),
+      ),
+    ),
     stateAtom: client.runtime.fn((a: { ref: PrRef; headSha: string; decisionId: string; state: DecisionState | null }) =>
       Effect.flatMap(rpc, (c) => c('SetState', a)),
     ),

@@ -41,7 +41,7 @@ describe('domain schemas', () => {
 
   it('ReviewRpcs lists its procedures', () => {
     expect([...ReviewRpcs.requests.keys()].sort()).toEqual(
-      ['Ask', 'Configure', 'DigDeeper', 'DraftRule', 'GetChats', 'GetDescription', 'GetDrafts', 'GetFilePatch', 'GetPr', 'GetSettings', 'Health', 'Opinion', 'PoolStatus', 'Prepare', 'Recall', 'Remember', 'Review', 'SetDrafts', 'SetFindingState', 'SetState', 'Sort', 'Stack', 'StackOpinion', 'SubmitReview'],
+      ['Ask', 'Configure', 'DigDeeper', 'DraftRule', 'GetChats', 'GetDescription', 'GetDrafts', 'GetFilePatch', 'GetPr', 'GetSettings', 'Health', 'Opinion', 'PoolStatus', 'Prepare', 'Recall', 'Remember', 'ResumeReview', 'Review', 'SetDrafts', 'SetFindingState', 'SetState', 'Sort', 'Stack', 'StackOpinion', 'StopReview', 'SubmitReview'],
     )
   })
 })

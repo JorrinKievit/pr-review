@@ -1,5 +1,5 @@
-import { AgentSort, type AgentError, Decision, type FileStat, type GitError, type GitHubError, type PrRef, type RepoNotConfigured, type SortResult } from '@pr-review/domain'
-import { Context, Deferred, Effect, Exit, Fiber, Layer, Option, Schema, type Stream } from 'effect'
+import { AgentSort, AgentError, Decision, type FileStat, type GitError, type GitHubError, type PrRef, type RepoNotConfigured, ReviewStopped, type SortResult } from '@pr-review/domain'
+import { Cause, Context, Deferred, Effect, Exit, Fiber, Layer, Option, Schema, type Stream } from 'effect'
 import { readFileSync } from 'node:fs'
 import { parse } from 'partial-json'
 import { Agent } from './Agent.ts'
@@ -57,6 +57,8 @@ export class Sorter extends Context.Service<
   Sorter,
   {
     sort(ref: PrRef, headSha: string): Effect.Effect<SortResult, SortError>
+    /** Interrupts the sorts `sort` runs for this PR (any head); whoever waits on one fails with the stopped message. */
+    cancel(ref: PrRef): Effect.Effect<void>
     /** The sort if one is cached, without running it. */
     cached(ref: PrRef, headSha: string): Effect.Effect<SortResult | undefined>
     /** What a running sort is doing: the current step, then each new one. Never ends; interrupt it when the sort is done. */
@@ -194,11 +196,16 @@ export class Sorter extends Context.Service<
         )
 
       const inflight = new Map<string, Deferred.Deferred<SortResult, SortError>>()
+      /** The sorts `sort` forked, by key, so `cancel` can reach them. */
+      const forked = new Map<string, Fiber.Fiber<SortResult, SortError>>()
+      // A sort only ends by interruption when its PR was stopped: the ones waiting on it get a reason they can show.
+      const stoppedError = () => new AgentError({ message: new ReviewStopped().message })
       const settle = (key: string, exit: Exit.Exit<SortResult, SortError>) =>
         Effect.suspend(() => {
           const d = inflight.get(key)
           inflight.delete(key)
-          return d ? Effect.asVoid(Deferred.done(d, exit)) : Effect.void
+          const told = Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause) ? Exit.fail(stoppedError()) : exit
+          return d ? Effect.asVoid(Deferred.done(d, told)) : Effect.void
         })
       const claim = (ref: PrRef, headSha: string) =>
         Effect.sync((): SortClaim => {
@@ -222,8 +229,21 @@ export class Sorter extends Context.Service<
             'running' in c
               ? c.running.pipe(measure('sort.join'))
               : // In the layer's scope, so a closed page never interrupts a sort someone else is waiting on.
-                Effect.flatMap(Effect.forkIn(storeFailuresDie(cache.get(new SortKey({ ...ref, headSha }))).pipe(Effect.onExit(c.done)), scope), Fiber.join),
+                Effect.gen(function* () {
+                  const key = keyOf({ ...ref, headSha })
+                  const fiber = yield* Effect.forkIn(
+                    storeFailuresDie(cache.get(new SortKey({ ...ref, headSha }))).pipe(Effect.onExit((exit) => Effect.andThen(Effect.sync(() => void forked.delete(key)), c.done(exit)))),
+                    scope,
+                  )
+                  forked.set(key, fiber)
+                  return yield* Effect.catchCause(Fiber.join(fiber), (cause): Effect.Effect<never, SortError> => (Cause.hasInterruptsOnly(cause) ? Effect.fail(stoppedError()) : Effect.failCause(cause)))
+                }),
           ),
+        cancel: (ref) =>
+          Effect.suspend(() => {
+            const prefix = `${keyOf({ ...ref, headSha: '' })}`
+            return Fiber.interruptAll([...forked].filter(([key]) => key.startsWith(prefix)).map(([, f]) => f))
+          }),
         cached: (ref, headSha) => read(new SortKey({ ...ref, headSha })),
         steps: (ref, headSha) => steps.follow(keyOf({ ...ref, headSha })),
       })

@@ -13,6 +13,7 @@ import {
   type Phase,
   type PrOpinion,
   ReviewRejected,
+  ReviewStopped,
   type Decision,
   type PrView,
   type ReviewEvent,
@@ -80,7 +81,7 @@ const paths = ['api.ts', 'cohesion.ts', 'page.tsx']
 const pr: PrView = {
   number: 7, title: 'Settings shell', author: 'sam', body: '', baseRef: 'master', headRef: 'h', headSha: 'HEAD1', state: 'open',
   host: 'github.com', owner: 'acme', repo: 'core', baseSha: 'B', mergeBase: 'MB', defaultBranch: 'master',
-  files: paths.map((path) => ({ path, additions: 1, deletions: 0 })), threads: [], checks: 'pass', stack: [], viewer: 'jorrin',
+  files: paths.map((path) => ({ path, additions: 1, deletions: 0 })), threads: [], checks: 'pass', stack: [], viewer: 'jorrin', stopped: false,
 }
 
 const decision = (id: string, path: string): Decision => ({
@@ -123,10 +124,15 @@ const renderPage = (
     /** Set on the review while no opinion is cached. */
     opinionError?: string
     /** Replaces the review stream, which by default follows `sort`. */
-    review?: Stream.Stream<ReviewEvent>
+    review?: Stream.Stream<ReviewEvent, ReviewStopped>
     deeper?: () => Stream.Stream<DeeperEvent>
+    /** Whether the companion says the review was stopped; StopReview and ResumeReview flip it. */
+    stopped?: boolean
   } = {},
 ) => {
+  let stopped = o.stopped ?? false
+  let stopCalls = 0
+  let resumeCalls = 0
   let drafts: ReadonlyArray<Draft> = []
   let stored = o.opinion?.cached
   let findingStates: FindingStates = {}
@@ -150,7 +156,9 @@ const renderPage = (
   let reviewCalls = 0
   const companion = fakeCompanion({
     handlers: {
-      GetPr: o.getPr ?? (() => Effect.succeed(pr)),
+      GetPr: o.getPr ?? (() => Effect.sync(() => ({ ...pr, stopped }))),
+      StopReview: () => Effect.sync(() => void ((stopped = true), stopCalls++)),
+      ResumeReview: () => Effect.sync(() => void ((stopped = false), resumeCalls++)),
       Review: () => (reviewCalls++, o.review ?? (o.sort ?? Stream.concat(Stream.make(done), Stream.never)).pipe(Stream.map(toReview))),
       GetFilePatch: ({ path, previous, mergeBase }) => Effect.sync(() => (patches.push(previous ? `${previous} => ${path}` : path), bases.push(mergeBase), patch(path))),
       SetState: (p) => Effect.sync(() => void setStates.push(p)),
@@ -219,7 +227,10 @@ const renderPage = (
       </AtomsContext.Provider>
     </RegistryProvider>,
   )
-  return { setStates, patches, bases, drafts: () => drafts, reviews, opinionRuns, stateCalls, ruleTexts, reviewCalls: () => reviewCalls }
+  return {
+    setStates, patches, bases, drafts: () => drafts, reviews, opinionRuns, stateCalls, ruleTexts, reviewCalls: () => reviewCalls,
+    stopCalls: () => stopCalls, resumeCalls: () => resumeCalls, stop: () => void (stopped = true),
+  }
 }
 
 const heading = (name: string) => screen.findByRole('heading', { name }, { timeout: 3000 })
@@ -607,6 +618,69 @@ test("shows phases with counts and the worker's current decision while preparing
   expect(within(rows[2]!).getByText('Read AGENTS.md').compareDocumentPosition(within(rows[2]!).getByText('Grep "bracket"'))).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
   expect(screen.queryByText(/Sorting…|Working…/)).toBeNull()
   expect(screen.queryByRole('navigation', { name: 'Review items' })).toBeNull()
+})
+
+const preparing = Stream.concat(Stream.make({ _tag: 'Preparing', phases: [phase({ id: 'sort', label: 'Sorting 3 files', state: 'running', startedAt: new Date().toISOString() })] } as ReviewEvent), Stream.never)
+
+test('the loading screen opens GitHub, leaving the review running', async () => {
+  const page = renderPage({ review: preparing })
+  const link = await screen.findByRole('link', { name: 'Open on GitHub' }, { timeout: 3000 })
+  expect(link).toHaveAttribute('href', 'https://github.com/acme/core/pull/7/files?native=1')
+  await userEvent.click(link)
+  expect(page.stopCalls()).toBe(0)
+})
+
+test('the loading screen can stop the review on the way to GitHub', async () => {
+  const assign = vi.fn()
+  vi.stubGlobal('location', { ...window.location, assign })
+  try {
+    const page = renderPage({ review: preparing })
+    await userEvent.click(await screen.findByRole('button', { name: 'Open on GitHub and stop review' }, { timeout: 3000 }))
+    await waitFor(() => expect(assign).toHaveBeenCalledWith('https://github.com/acme/core/pull/7/files?native=1'))
+    expect(page.stopCalls()).toBe(1)
+  } finally {
+    vi.unstubAllGlobals()
+  }
+})
+
+test('a stopped PR shows the stopped page and runs nothing until Start review', async () => {
+  const page = renderPage({ stopped: true, review: preparing })
+  await screen.findByText("You stopped Claude's review of this PR.", undefined, { timeout: 3000 })
+  expect(screen.getByRole('link', { name: 'Open on GitHub' })).toHaveAttribute('href', 'https://github.com/acme/core/pull/7/files?native=1')
+  expect(page.reviewCalls()).toBe(0)
+  await userEvent.click(screen.getByRole('button', { name: 'Start review' }))
+  await screen.findByRole('list', { name: 'Preparing the review' }, { timeout: 3000 })
+  expect(page.resumeCalls()).toBe(1)
+  expect(page.reviewCalls()).toBe(1)
+})
+
+test('a review stopped from another tab shows the stopped page', async () => {
+  let stop = () => {}
+  // Like the companion: a stopped run ends the stream with ReviewStopped.
+  const page = renderPage({ review: Stream.concat(Stream.take(preparing, 1), Stream.drain(Stream.fromEffect(Effect.andThen(Effect.sleep(50), Effect.sync(() => stop()))))).pipe(Stream.concat(Stream.fail(new ReviewStopped()))) })
+  stop = page.stop
+  const seen: string[] = []
+  const watch = new MutationObserver(() => void seen.push(document.body.textContent ?? ''))
+  watch.observe(document.body, { childList: true, subtree: true, characterData: true })
+  await screen.findByText("You stopped Claude's review of this PR.", undefined, { timeout: 3000 })
+  watch.disconnect()
+  expect(seen.some((t) => t.includes('sort failed'))).toBe(false)
+})
+
+test('a review stopped from another tab while decisions are judged shows the stopped page', async () => {
+  let stop = () => {}
+  const judging: ReviewEvent = { _tag: 'Done', sort: sorted, state: {}, findingStates: {}, opinion: { ...opinion, decisions: [opinion.decisions[0]!] }, judging: true }
+  const gate = Deferred.makeUnsafe<void>()
+  const page = renderPage({
+    review: Stream.make(judging).pipe(
+      Stream.concat(Stream.drain(Stream.fromEffect(Effect.andThen(Deferred.await(gate), Effect.sync(() => stop()))))),
+      Stream.concat(Stream.fail(new ReviewStopped())),
+    ),
+  })
+  stop = page.stop
+  expect(await heading('Decision one')).toBeInTheDocument()
+  await act(async () => void Effect.runSync(Deferred.succeed(gate, undefined)))
+  expect(await screen.findByText("You stopped Claude's review of this PR.", undefined, { timeout: 3000 })).toBeInTheDocument()
 })
 
 test('renders the review once on Done, ordered by severity', async () => {

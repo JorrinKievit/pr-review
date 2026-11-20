@@ -128,6 +128,8 @@ export const relay = (native: NativeConnect, pages: OnConnectLike, settings: Eff
         Sort: (p) => stream((c) => c.Sort(p)),
         Review: (p) => stream((c) => c.Review(p)),
         Prepare: (p) => call((c) => c.Prepare(p)),
+        StopReview: (p) => call((c) => c.StopReview(p)),
+        ResumeReview: (p) => call((c) => c.ResumeReview(p)),
         SetState: (p) => call((c) => c.SetState(p)),
         Opinion: (p) => stream((c) => c.Opinion(p)),
         DigDeeper: (p) => stream((c) => c.DigDeeper(p)),

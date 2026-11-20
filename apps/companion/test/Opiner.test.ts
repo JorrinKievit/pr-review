@@ -43,6 +43,7 @@ const sorts: Record<number, SortResult> = { 6: sortOf([decision('base-model', 's
 const fakeSorter = Layer.succeed(
   Sorter,
   Sorter.of({
+    cancel: () => Effect.void,
     sort: (r) => (sorts[r.number] ? Effect.succeed(sorts[r.number]!) : Effect.die(`sorted #${r.number}`)),
     cached: (r) => Effect.succeed(r.number === 7 ? undefined : sorts[r.number]),
     steps: () => Stream.never,

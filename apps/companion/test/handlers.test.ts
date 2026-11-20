@@ -53,17 +53,18 @@ const opinionReply: AgentOpinion = {
 const opinionCalls = (calls: ReadonlyArray<{ log: { kind: string } }>) => calls.filter((c) => c.log.kind === 'opinion').length
 
 const setup = (
-  o: { delay?: number; overviewFails?: string; github?: Parameters<typeof fakeGitHub>[0]; sorts?: ReadonlyArray<AgentSort>; files?: FileStat[]; diff?: NonNullable<Parameters<typeof fakeGit>[0]>['diff']; git?: ReturnType<typeof fakeGit>; opinions?: ReadonlyArray<AgentOpinion> } = {},
+  o: { delay?: number; onInterrupt?: (number: number) => void; overviewFails?: string; github?: Parameters<typeof fakeGitHub>[0]; sorts?: ReadonlyArray<AgentSort>; files?: FileStat[]; diff?: NonNullable<Parameters<typeof fakeGit>[0]>['diff']; git?: ReturnType<typeof fakeGit>; opinions?: ReadonlyArray<AgentOpinion> } = {},
 ) => {
   let sorted = 0
   let opined = 0
   const agent = fakeAgent((call) =>
-    call.log.kind === 'overview' && o.overviewFails
+    (call.log.kind === 'overview' && o.overviewFails
       ? Effect.fail(new AgentError({ message: o.overviewFails }))
       : Effect.as(
           o.delay ? Effect.sleep(o.delay) : Effect.void,
           call.log.kind === 'overview' ? overviewReply : call.log.kind === 'stack-opinion' ? { findings: [] } : call.log.kind === 'opinion' || call.log.kind === 'deeper' ? (o.opinions?.[opined++] ?? opinionReply) : (o.sorts?.[sorted++] ?? sortReply),
-        ),
+        )
+    ).pipe(Effect.onInterrupt(() => Effect.sync(() => o.onInterrupt?.(call.log.number)))),
   )
   const deps = Layer.mergeAll(agent.layer, (o.git ?? fakeGit({ files: o.files ?? files, diff: o.diff ?? 'd' })).layer, fakeGitHub({ listOpenPrs: () => Effect.succeed([entry(7, 'master', 'feat')]), ...o.github }), configLayer())
   const store = Store.layerWith(KeyValueStore.layerMemory)
@@ -520,6 +521,82 @@ describe('handlers', () => {
       assert.isTrue(yield* (yield* asked.client).Prepare({ ref }))
       yield* Effect.sleep('30 millis')
       assert.deepStrictEqual(asked.agent.calls.map((x) => x.log.kind), ['sort'])
+    }).pipe(Effect.scoped))
+
+  it.effect('GetPr says whether the review was stopped', () =>
+    Effect.gen(function* () {
+      const c = yield* setup().client
+      assert.isFalse((yield* c.GetPr({ ref })).stopped)
+      yield* c.StopReview({ ref })
+      assert.isTrue((yield* c.GetPr({ ref })).stopped)
+      yield* c.ResumeReview({ ref })
+      assert.isFalse((yield* c.GetPr({ ref })).stopped)
+    }).pipe(Effect.scoped))
+
+  it.live('after StopReview, Prepare starts nothing', () =>
+    Effect.gen(function* () {
+      const { agent, client } = setup({ delay: 100, github: { requestedReviewers: () => Effect.succeed(['Me']) } })
+      const c = yield* client
+      yield* c.StopReview({ ref })
+      yield* c.Prepare({ ref })
+      yield* Effect.sleep('30 millis')
+      assert.strictEqual(agent.calls.length, 0)
+    }).pipe(Effect.scoped))
+
+  it.live('stopping a stacked PR does not prepare the one above', () =>
+    Effect.gen(function* () {
+      const { agent, client } = setup({ delay: 100, files: [{ path: 'src/a.ts', additions: 300, deletions: 0 }], github: { listOpenPrs: () => Effect.succeed([entry(7, 'master', 'feat'), entry(8, 'feat', 'feat2')]) } })
+      const c = yield* client
+      yield* Effect.forkChild(Stream.runDrain(c.Review({ ref, headSha: 'HEAD1' })))
+      yield* Effect.sleep('20 millis')
+      yield* c.StopReview({ ref })
+      yield* Effect.sleep('150 millis')
+      assert.deepStrictEqual(agent.calls.map((x) => x.log.number), [7])
+    }).pipe(Effect.scoped))
+
+  it.live('Review of a stopped PR fails with ReviewStopped and runs nothing', () =>
+    Effect.gen(function* () {
+      const { agent, client } = setup()
+      const c = yield* client
+      yield* c.StopReview({ ref })
+      const e = yield* Effect.flip(Stream.runCollect(c.Review({ ref, headSha: 'HEAD1' })))
+      assert.strictEqual(e._tag, 'ReviewStopped')
+      yield* Effect.sleep('20 millis')
+      assert.strictEqual(agent.calls.length, 0)
+    }).pipe(Effect.scoped))
+
+  it.live('a running review that is stopped ends with ReviewStopped', () =>
+    Effect.gen(function* () {
+      const { client } = setup({ delay: 200 })
+      const c = yield* client
+      const review = yield* Effect.forkChild(Effect.flip(Stream.runCollect(c.Review({ ref, headSha: 'HEAD1' }))))
+      yield* Effect.sleep('30 millis')
+      yield* c.StopReview({ ref })
+      assert.strictEqual((yield* Fiber.join(review))._tag, 'ReviewStopped')
+    }).pipe(Effect.scoped))
+
+  it.live('the stack view sorts nothing for a stopped PR', () =>
+    Effect.gen(function* () {
+      const { agent, client } = setup({ github: { listOpenPrs: () => Effect.succeed([entry(7, 'master', 'feat'), entry(8, 'feat', 'feat2')]) } })
+      const c = yield* client
+      yield* c.StopReview({ ref })
+      const last = (yield* Stream.runCollect(c.Stack({ ref: { ...ref, number: 8 } }))).at(-1)!
+      assert.deepStrictEqual(last.entries.map((e) => [e.pr.number, e.status]), [[7, 'failed'], [8, 'done']])
+      assert.notInclude(agent.calls.map((x) => x.log.number), 7)
+      assert.notInclude(agent.calls.map((x) => x.log.kind), 'stack-opinion')
+    }).pipe(Effect.scoped))
+
+  it.live('stopping a PR the stack view is sorting interrupts that sort, and the stack carries on', () =>
+    Effect.gen(function* () {
+      const interrupted: number[] = []
+      const { agent, client } = setup({ delay: 150, onInterrupt: (n) => void interrupted.push(n), github: { listOpenPrs: () => Effect.succeed([entry(7, 'master', 'feat'), entry(8, 'feat', 'feat2')]) } })
+      const c = yield* client
+      const stack = yield* Effect.forkChild(Stream.runCollect(c.Stack({ ref: { ...ref, number: 8 } })))
+      while (!agent.calls.some((x) => x.log.number === 8)) yield* Effect.sleep('5 millis')
+      yield* c.StopReview({ ref: { ...ref, number: 8 } })
+      assert.include(interrupted, 8)
+      const last = (yield* Fiber.join(stack)).at(-1)!
+      assert.deepStrictEqual(last.entries.map((e) => [e.pr.number, e.status]), [[7, 'done'], [8, 'failed']])
     }).pipe(Effect.scoped))
 
   it.effect('Opinion with run false and nothing cached is Idle', () =>

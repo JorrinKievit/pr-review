@@ -65,6 +65,8 @@ Run everything inside WSL and use the Windows browser. `install` notices WSL and
 
 Open a PR's "Files changed" page. The extension redirects to the review page. "Open on GitHub" goes back without redirecting (`?native=1`). For a stacked PR, the stack pill in the top bar opens the stack view.
 
+While a review is being prepared, the loading screen can open GitHub and leave the review running, or open GitHub and stop it. A stopped PR stays stopped, across pushes too: nothing prepares it, and its review page offers "Start review" instead.
+
 Keys: `j`/`k` move, `a` accepts, `p` pushes back, `⌘J` discusses, `⌘K` jumps, `esc` closes. Select lines in a diff to ask about them. Nothing is posted to GitHub until you press a button.
 
 ## Files

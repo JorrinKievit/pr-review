@@ -21,7 +21,7 @@ afterEach(() => scopes.splice(0).forEach((s) => Effect.runFork(Scope.close(s, Ex
 
 const view = (number: number): PrView => ({
   number, title: `PR ${number}`, author: 'a', body: '', baseRef: 'b', headRef: 'h', headSha: `s${number}`, state: 'open',
-  host: ref.host, owner: ref.owner, repo: ref.repo, baseSha: 'B', mergeBase: 'MB', defaultBranch: 'master', files: [], threads: [], checks: 'pass', stack: [], viewer: 'me',
+  host: ref.host, owner: ref.owner, repo: ref.repo, baseSha: 'B', mergeBase: 'MB', defaultBranch: 'master', files: [], threads: [], checks: 'pass', stack: [], viewer: 'me', stopped: false,
 })
 
 const renderStack = (events: ReadonlyArray<StackEvent>, o: { getPr?: (n: number) => Effect.Effect<PrView, GitError>; drafts?: Draft[]; stackOpinion?: StackOpinionEvent; cached?: boolean } = {}) => {

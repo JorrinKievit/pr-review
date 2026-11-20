@@ -604,4 +604,36 @@ describe('Reviewer', () => {
         assert.isTrue(r.opinion!.decisions.every((d) => d.carriedFrom === undefined))
       }))
   })
+
+  it.live('stop interrupts the running review and marks the PR', () =>
+    Effect.gen(function* () {
+      let interrupted = false
+      const { agent, layer } = setup({ sort: () => Effect.never.pipe(Effect.onInterrupt(() => Effect.sync(() => void (interrupted = true)))) })
+      yield* Effect.gen(function* () {
+        const reviewer = yield* Reviewer
+        yield* reviewer.prepare(ref, 'HEAD1')
+        while (agent.calls.length === 0) yield* Effect.sleep('5 millis')
+        yield* reviewer.stop(ref)
+        assert.isTrue(interrupted)
+        assert.isTrue(Option.isNone(yield* Stream.runHead(reviewer.progress(ref, 'HEAD1'))))
+        assert.isTrue(yield* reviewer.isStopped(ref))
+      }).pipe(Effect.provide(layer))
+    }))
+
+  it.live('a stopped PR is not prepared, and resume lets it run', () =>
+    Effect.gen(function* () {
+      const { agent, layer } = setup()
+      yield* Effect.gen(function* () {
+        const reviewer = yield* Reviewer
+        yield* reviewer.stop(ref)
+        yield* reviewer.stop(ref)
+        yield* reviewer.prepare(ref, 'HEAD1')
+        yield* Effect.sleep('20 millis')
+        assert.strictEqual(agent.calls.length, 0)
+        yield* reviewer.resume(ref)
+        assert.isFalse(yield* reviewer.isStopped(ref))
+        yield* reviewer.result(ref, 'HEAD1')
+        assert.isAbove(agent.calls.length, 0)
+      }).pipe(Effect.provide(layer))
+    }))
 })

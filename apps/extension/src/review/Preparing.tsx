@@ -1,7 +1,10 @@
-import type { Phase, PrView } from '@pr-review/domain'
+import { useAtomSet } from '@effect/atom-react'
+import type { Phase, PrRef, PrView } from '@pr-review/domain'
 import { Check, X } from 'lucide-react'
+import { useAtoms } from '../atoms.ts'
 import { cn } from '../lib/utils.ts'
-import { clock, Dot, Spinner, useNow, Working } from '../ui/index.tsx'
+import { githubFilesUrl } from '../Setup.tsx'
+import { Button, clock, Dot, Spinner, useNow, Working } from '../ui/index.tsx'
 
 function PhaseIcon({ state }: { state: Phase['state'] }) {
   if (state === 'running') return <Spinner className="size-3 shrink-0" />
@@ -11,8 +14,9 @@ function PhaseIcon({ state }: { state: Phase['state'] }) {
 }
 
 /** The one wait before the review: each phase with what it is doing right now. */
-export function Preparing({ pr, phases }: { pr: PrView; phases: ReadonlyArray<Phase> }) {
+export function Preparing({ prRef, pr, phases }: { prRef: PrRef; pr: PrView; phases: ReadonlyArray<Phase> }) {
   const now = useNow()
+  const stop = useAtomSet(useAtoms().stopReviewAtom, { mode: 'promise' })
   return (
     <main className="mx-auto mt-24 max-w-[38rem] px-6">
       <p className="text-sm text-dim">
@@ -47,6 +51,15 @@ export function Preparing({ pr, phases }: { pr: PrView; phases: ReadonlyArray<Ph
           ))}
         </ol>
       )}
+      <div className="mt-6 flex flex-wrap items-center gap-2">
+        <Button size="sm" variant="outline" asChild>
+          <a href={githubFilesUrl(prRef)}>Open on GitHub</a>
+        </Button>
+        {/* The stop lands before the page leaves, so GitHub's own pages can't prepare it again first. */}
+        <Button size="sm" variant="ghost" onClick={() => void stop(prRef).finally(() => location.assign(githubFilesUrl(prRef)))}>
+          Open on GitHub and stop review
+        </Button>
+      </div>
     </main>
   )
 }

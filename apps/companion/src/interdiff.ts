@@ -17,12 +17,13 @@ export const sameChange = (a: StructuredPatch, b: StructuredPatch) => JSON.strin
 
 const shape = (f: StructuredPatch) => [f.oldFileName, f.newFileName, f.oldMode, f.newMode, f.isRename, f.isCopy, f.isCreate, f.isDelete, f.isBinary, f.hunks.map((h) => h.lines)]
 
-/** New-side line ranges per file: the lines GitHub accepts a review comment on. */
-export const hunkLines = (patch: string) =>
+/** Line ranges per file on one side (new by default): the lines GitHub accepts a review comment on. */
+export const hunkLines = (patch: string, side: 'LEFT' | 'RIGHT' = 'RIGHT') =>
   new Map(
     parseDiff(patch).flatMap((f) => {
-      const to = pathOf(f.newFileName)
-      return to ? [[to, f.hunks.filter((h) => h.newLines > 0).map((h): [number, number] => [h.newStart, h.newStart + h.newLines - 1])] as const] : []
+      const path = pathOf(side === 'RIGHT' ? f.newFileName : f.oldFileName)
+      const ranges = f.hunks.map((h): [number, number] => (side === 'RIGHT' ? [h.newStart, h.newLines] : [h.oldStart, h.oldLines]))
+      return path ? [[path, ranges.filter(([, n]) => n > 0).map(([start, n]): [number, number] => [start, start + n - 1])] as const] : []
     }),
   )
 

@@ -231,10 +231,13 @@ describe('handlers', () => {
       assert.deepStrictEqual(last.entries.map((e) => [e.pr.number, e.state]), [[7, { d1: 'accepted' }], [8, {}]])
     }).pipe(Effect.scoped))
 
+  // The PR's own diff (MB1..HEAD1): src/a.ts lines 1-6 on the new side, 1-5 on the old.
+  const prDiff = 'diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1,5 +1,6 @@\n+top\n one\n two\n three\n four\n five\n'
+
   it.effect('drafts are kept per PR and sent with the review, then cleared', () =>
     Effect.gen(function* () {
       const sent: unknown[] = []
-      const c = yield* setup({ github: { submitReview: (_o, _r, _n, r) => Effect.sync(() => void sent.push(r)) } }).client
+      const c = yield* setup({ git: fakeGit({ diff: prDiff }), github: { submitReview: (_o, _r, _n, r) => Effect.sync(() => void sent.push(r)) } }).client
       const draft = { id: 'd1', path: 'src/a.ts', line: 2, side: 'RIGHT' as const, body: 'Use the helper' }
       yield* c.SetDrafts({ ref, drafts: [draft] })
       assert.deepStrictEqual(yield* c.GetDrafts({ ref }), [draft])
@@ -254,7 +257,7 @@ describe('handlers', () => {
 
   it.effect('a refused review keeps the drafts', () =>
     Effect.gen(function* () {
-      const c = yield* setup({ github: { submitReview: () => Effect.fail(new ReviewRejected({ message: 'Validation Failed' })) } }).client
+      const c = yield* setup({ git: fakeGit({ diff: prDiff }), github: { submitReview: () => Effect.fail(new ReviewRejected({ message: 'Validation Failed' })) } }).client
       const draft = { id: 'd1', path: 'src/a.ts', line: 2, side: 'RIGHT' as const, body: 'keep me' }
       yield* c.SetDrafts({ ref, drafts: [draft] })
       assert.instanceOf(yield* Effect.flip(c.SubmitReview({ ref, event: 'COMMENT', body: '', commitId: 'HEAD1' })), ReviewRejected)
@@ -262,7 +265,21 @@ describe('handlers', () => {
     }).pipe(Effect.scoped))
 
   // The fake PR's head is HEAD1; the page still showed OLD, where src/a.ts lacked its first line.
-  const pushed = (from: string) => (from === 'OLD' ? 'diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -0,0 +1 @@\n+top\n@@ -5 +6,2 @@\n-five\n+five\n+more\n' : '')
+  const pushed = (from: string) => (from === 'OLD' ? 'diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -0,0 +1 @@\n+top\n@@ -5 +6,2 @@\n-five\n+five\n+more\n' : from === 'MB1' ? prDiff : '')
+
+  it.effect('a comment outside the PR diff is dropped and the rest of the review goes out', () =>
+    Effect.gen(function* () {
+      const sent: unknown[] = []
+      const c = yield* setup({ git: fakeGit({ diff: pushed }), github: { submitReview: (_o, _r, _n, r) => Effect.sync(() => void sent.push(r)) } }).client
+      const off = { id: 'd1', path: 'src/a.ts', line: 40, side: 'RIGHT' as const, body: 'Far away', headSha: 'HEAD1' }
+      const otherFile = { id: 'd2', path: 'src/b.ts', line: 2, side: 'RIGHT' as const, body: 'Not in the PR', headSha: 'HEAD1' }
+      const span = { id: 'd3', path: 'src/a.ts', line: 40, startLine: 2, side: 'RIGHT' as const, body: 'Leaves the hunk', headSha: 'HEAD1' }
+      const left = { id: 'd4', path: 'src/a.ts', line: 3, side: 'LEFT' as const, body: 'Old side', headSha: 'HEAD1' }
+      const kept = { id: 'd5', path: 'src/a.ts', line: 2, side: 'RIGHT' as const, body: 'On two', headSha: 'HEAD1' }
+      yield* c.SetDrafts({ ref, drafts: [off, otherFile, span, left, kept] })
+      yield* c.SubmitReview({ ref, event: 'COMMENT', body: '', commitId: 'HEAD1' })
+      assert.deepStrictEqual(sent, [{ event: 'COMMENT', body: '', commitId: 'HEAD1', comments: [left, kept] }])
+    }).pipe(Effect.scoped))
 
   it.effect('a review sent after a push moves its comments with the code and goes on the new head', () =>
     Effect.gen(function* () {

@@ -9,7 +9,7 @@ import { Config } from './Config.ts'
 import { Git } from './Git.ts'
 import { GitHub } from './GitHub.ts'
 import { changedBetween, carryFindingStates, continues } from './carry.ts'
-import { moveLine } from './interdiff.ts'
+import { hunkLines, moveLine } from './interdiff.ts'
 import { Opiner } from './Opiner.ts'
 import { guidanceSection } from './opinionContext.ts'
 import { Mapper } from './Mapper.ts'
@@ -219,7 +219,7 @@ export const HandlersLive = ReviewRpcs.toLayer(
 
     /**
      * The drafts placed on the PR's current head. A draft written on an earlier head (its own, or the page's for older
-     * drafts) moves with the code; left-side lines move between the two merge bases. Drafts whose lines are gone are dropped.
+     * drafts) moves with the code; left-side lines move between the two merge bases. Drafts whose lines are gone, or off the PR's diff, are dropped.
      */
     const draftsAtHead = Effect.fnUntraced(function* (ref: PrRef, pageHead: string, head: { headSha: string; mergeBase: string }) {
       const repoKey = repoKeyOf(ref)
@@ -244,7 +244,14 @@ export const HandlersLive = ReviewRpcs.toLayer(
         else lost.push(d)
       }
       if (lost.length) yield* Effect.logWarning(`Dropped drafts whose lines a push removed: ${lost.map((d) => `${d.path}:${d.line}`).join(', ')}`)
-      return placed
+      // GitHub refuses the whole review when one comment sits outside the PR's diff.
+      const patch = yield* git.diff(repoKey, head.mergeBase, head.headSha).pipe(Effect.orElseSucceed(() => undefined))
+      if (patch === undefined) return placed
+      const sides = { RIGHT: hunkLines(patch), LEFT: hunkLines(patch, 'LEFT') }
+      const onDiff = (d: Draft) => (sides[d.side].get(d.path) ?? []).some(([a, b]) => a <= (d.startLine ?? d.line) && d.line <= b)
+      const off = placed.filter((d) => !onDiff(d))
+      if (off.length) yield* Effect.logWarning(`Dropped drafts outside the PR's diff: ${off.map((d) => `${d.path}:${d.line}`).join(', ')}`)
+      return placed.filter(onDiff)
     })
 
     /** The PR stacked right on top of this one gets its review prepared, so it's ready when the reviewer moves up. */
